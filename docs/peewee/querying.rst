@@ -1,7 +1,5 @@
 .. _querying:
 
-.. include:: help-request.rst
-
 Querying
 ========
 
@@ -110,8 +108,8 @@ The above approach is slow for a couple of reasons:
 4. We are retrieving the *last insert id*, which causes an additional query to
    be executed in some cases.
 
-You can get a **significant speedup** by simply wrapping this in a transaction
-with :py:meth:`~Database.atomic`.
+You can get a significant speedup by simply wrapping this in a transaction with
+:py:meth:`~Database.atomic`.
 
 .. code-block:: python
 
@@ -121,27 +119,56 @@ with :py:meth:`~Database.atomic`.
             MyModel.create(**data_dict)
 
 The above code still suffers from points 2, 3 and 4. We can get another big
-boost by calling :py:meth:`~Model.insert_many`. This method accepts a list of
-tuples or dictionaries to insert.
+boost by using :py:meth:`~Model.insert_many`. This method accepts a list of
+tuples or dictionaries, and inserts multiple rows in a single query:
 
 .. code-block:: python
 
-    # Fastest.
+    data_source = [
+        {'field1': 'val1-1', 'field2': 'val1-2'},
+        {'field1': 'val2-1', 'field2': 'val2-2'},
+        # ...
+    ]
+
+    # Fastest way to INSERT multiple rows.
     MyModel.insert_many(data_source).execute()
 
-    # We can also use tuples and specify the fields being inserted.
-    fields = [MyModel.field1, MyModel.field2]
+The :py:meth:`~Model.insert_many` method also accepts a list of row-tuples,
+provided you also specify the corresponding fields:
+
+.. code-block:: python
+
+    # We can INSERT tuples as well...
     data = [('val1-1', 'val1-2'),
             ('val2-1', 'val2-2'),
             ('val3-1', 'val3-2')]
-    MyModel.insert_many(data, fields=fields).execute()
+
+    # But we need to indicate which fields the values correspond to.
+    MyModel.insert_many(data, fields=[MyModel.field1, MyModel.field2]).execute()
+
+It is also a good practice to wrap the bulk insert in a transaction:
+
+.. code-block:: python
 
     # You can, of course, wrap this in a transaction as well:
     with db.atomic():
         MyModel.insert_many(data, fields=fields).execute()
 
+.. note::
+    SQLite users should be aware of some caveats when using bulk inserts.
+    Specifically, your SQLite3 version must be 3.7.11.0 or newer to take
+    advantage of the bulk insert API. Additionally, by default SQLite limits
+    the number of bound variables in a SQL query to ``999``.
+
+Inserting rows in batches
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
 Depending on the number of rows in your data source, you may need to break it
-up into chunks:
+up into chunks. SQLite in particular typically has a `limit of 999 <https://www.sqlite.org/limits.html#max_variable_number>`_
+variables-per-query (batch size would then be roughly 1000 / row length).
+
+You can write a loop to batch your data into chunks (in which case it is
+**strongly recommended** you use a transaction):
 
 .. code-block:: python
 
@@ -150,9 +177,48 @@ up into chunks:
         for idx in range(0, len(data_source), 100):
             MyModel.insert_many(data_source[idx:idx+100]).execute()
 
-If :py:meth:`Model.insert_many` won't work for your use-case, you can also use
-the :py:meth:`Database.batch_commit` helper to process chunks of rows inside
-transactions:
+Peewee comes with a :py:func:`chunked` helper function which you can use for
+*efficiently* chunking a generic iterable into a series of *batch*-sized
+iterables:
+
+.. code-block:: python
+
+    from peewee import chunked
+
+    # Insert rows 100 at a time.
+    with db.atomic():
+        for batch in chunked(data_source, 100):
+            MyModel.insert_many(batch).execute()
+
+Alternatives
+^^^^^^^^^^^^
+
+The :py:meth:`Model.bulk_create` method behaves much like
+:py:meth:`Model.insert_many`, but instead it accepts a list of unsaved model
+instances to insert, and it optionally accepts a batch-size parameter. To use
+the :py:meth:`~Model.bulk_create` API:
+
+.. code-block:: python
+
+    # Read list of usernames from a file, for example.
+    with open('user_list.txt') as fh:
+        # Create a list of unsaved User instances.
+        users = [User(username=line.strip()) for line in fh.readlines()]
+
+    # Wrap the operation in a transaction and batch INSERT the users
+    # 100 at a time.
+    with db.atomic():
+        User.bulk_create(users, batch_size=100)
+
+.. note::
+    If you are using Postgresql (which supports the ``RETURNING`` clause), then
+    the previously-unsaved model instances will have their new primary key
+    values automatically populated.
+
+Alternatively, you can use the :py:meth:`Database.batch_commit` helper to
+process chunks of rows inside *batch*-sized transactions. This method also
+provides a workaround for databases besides Postgresql, when the primary-key of
+the newly-created rows must be obtained.
 
 .. code-block:: python
 
@@ -164,12 +230,8 @@ transactions:
     for row in db.batch_commit(row_data, 100):
         User.create(**row)
 
-.. note::
-    SQLite users should be aware of some caveats when using bulk inserts.
-    Specifically, your SQLite3 version must be 3.7.11.0 or newer to take
-    advantage of the bulk insert API. Additionally, by default SQLite limits
-    the number of bound variables in a SQL query to ``999``. This value can be
-    modified by setting the ``SQLITE_MAX_VARIABLE_NUMBER`` flag.
+Bulk-loading from another table
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 If the data you would like to bulk load is stored in another table, you can
 also create *INSERT* queries whose source is a *SELECT* query. Use the
@@ -177,11 +239,19 @@ also create *INSERT* queries whose source is a *SELECT* query. Use the
 
 .. code-block:: python
 
-    query = (TweetArchive
-             .insert_from(
-                 Tweet.select(Tweet.user, Tweet.message),
-                 fields=[Tweet.user, Tweet.message])
-             .execute())
+    res = (TweetArchive
+           .insert_from(
+               Tweet.select(Tweet.user, Tweet.message),
+               fields=[TweetArchive.user, TweetArchive.message])
+           .execute())
+
+The above query is equivalent to the following SQL:
+
+.. code-block:: sql
+
+    INSERT INTO "tweet_archive" ("user_id", "message")
+    SELECT "user_id", "message" FROM "tweet";
+
 
 Updating existing records
 -------------------------
@@ -641,6 +711,21 @@ dictionaries, namedtuples or tuples. The following methods can be used on any
 * :py:meth:`~BaseQuery.namedtuples`
 * :py:meth:`~BaseQuery.tuples`
 
+Don't forget to append the :py:meth:`~BaseQuery.iterator` method call to also
+reduce memory consumption. For example, the above code might look like:
+
+.. code-block:: python
+
+    # Let's assume we've got 10 million stat objects to dump to a csv file.
+    stats = Stat.select()
+
+    # Our imaginary serializer class
+    serializer = CSVSerializer()
+
+    # Loop over all the stats (rendered as tuples, without caching) and serialize.
+    for stat_tuple in stats.tuples().iterator():
+        serializer.serialize_tuple(stat_tuple)
+
 When iterating over a large number of rows that contain columns from multiple
 tables, peewee will reconstruct the model graph for each row returned. This
 operation can be slow for complex graphs. For example, if we were selecting a
@@ -667,6 +752,18 @@ For example:
     # user attributes to the tweet instance:
     for tweet in query.objects():
         print(tweet.username, tweet.content)
+
+For maximum performance, you can execute queries and then iterate over the
+results using the underlying database cursor. :py:meth:`Database.execute`
+accepts a query object, executes the query, and returns a DB-API 2.0 ``Cursor``
+object. The cursor will return the raw row-tuples:
+
+.. code-block:: python
+
+    query = Tweet.select(Tweet.content, User.username).join(User)
+    cursor = database.execute(query)
+    for (content, username) in cursor:
+        print(username, '->', content)
 
 Filtering records
 -----------------
@@ -1039,31 +1136,399 @@ You can retrieve multiple scalar values by passing ``as_tuple=True``:
 Window functions
 ----------------
 
+A :py:class:`Window` function refers to an aggregate function that operates on
+a sliding window of data that is being processed as part of a ``SELECT`` query.
+Window functions make it possible to do things like:
+
+1. Perform aggregations against subsets of a result-set.
+2. Calculate a running total.
+3. Rank results.
+4. Compare a row value to a value in the preceding (or succeeding!) row(s).
+
 peewee comes with support for SQL window functions, which can be created by
 calling :py:meth:`Function.over` and passing in your partitioning or ordering
 parameters.
 
+For the following examples, we'll use the following model and sample data:
+
 .. code-block:: python
 
-    # Get the list of employees and the average salary for their dept.
-    query = (Employee
-             .select(
-                 Employee.name,
-                 Employee.department,
-                 Employee.salary,
-                 fn.Avg(Employee.salary).over(
-                     partition_by=[Employee.department]))
-             .order_by(Employee.name))
+    class Sample(Model):
+        counter = IntegerField()
+        value = FloatField()
 
-    # Rank employees by salary.
-    query = (Employee
-             .select(
-                 Employee.name,
-                 Employee.salary,
-                 fn.rank().over(
-                     order_by=[Employee.salary])))
+    data = [(1, 10),
+            (1, 20),
+            (2, 1),
+            (2, 3),
+            (3, 100)]
+    Sample.insert_many(data, fields=[Sample.counter, Sample.value]).execute()
 
-For general information on window functions, check out the `postgresql docs <http://www.postgresql.org/docs/9.1/static/tutorial-window.html>`_.
+Our sample table now contains:
+
+=== ======== ======
+id  counter  value
+=== ======== ======
+1   1        10.0
+2   1        20.0
+3   2        1.0
+4   2        3.0
+5   3        100.0
+=== ======== ======
+
+Ordered Windows
+^^^^^^^^^^^^^^^
+
+Let's calculate a running sum of the ``value`` field. In order for it to be a
+"running" sum, we need it to be ordered, so we'll order with respect to the
+Sample's ``id`` field:
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).over(order_by=[Sample.id]).alias('total'))
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.total)
+
+    # 1    10.    10.
+    # 1    20.    30.
+    # 2     1.    31.
+    # 2     3.    34.
+    # 3   100    134.
+
+For another example, we'll calculate the difference between the current value
+and the previous value, when ordered by the ``id``:
+
+.. code-block:: python
+
+    difference = Sample.value - fn.LAG(Sample.value, 1).over(order_by=[Sample.id])
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        difference.alias('diff'))
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.diff)
+
+    # 1    10.   NULL
+    # 1    20.    10.  -- (20 - 10)
+    # 2     1.   -19.  -- (1 - 20)
+    # 2     3.     2.  -- (3 - 1)
+    # 3   100     97.  -- (100 - 3)
+
+Partitioned Windows
+^^^^^^^^^^^^^^^^^^^
+
+Let's calculate the average ``value`` for each distinct "counter" value. Notice
+that there are three possible values for the ``counter`` field (1, 2, and 3).
+We can do this by calculating the ``AVG()`` of the ``value`` column over a
+window that is partitioned depending on the ``counter`` field:
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.AVG(Sample.value).over(partition_by=[Sample.counter]).alias('cavg'))
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.cavg)
+
+    # 1    10.    15.
+    # 1    20.    15.
+    # 2     1.     2.
+    # 2     3.     2.
+    # 3   100    100.
+
+We can use ordering within partitions by specifying both the ``order_by`` and
+``partition_by`` parameters. For an example, let's rank the samples by value
+within each distinct ``counter`` group.
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.RANK().over(
+            order_by=[Sample.value],
+            partition_by=[Sample.counter]).alias('rank'))
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.rank)
+
+    # 1    10.    1
+    # 1    20.    2
+    # 2     1.    1
+    # 2     3.    2
+    # 3   100     1
+
+Bounded windows
+^^^^^^^^^^^^^^^
+
+By default, window functions are evaluated using an *unbounded preceding* start
+for the window, and the *current row* as the end. We can change the bounds of
+the window our aggregate functions operate on by specifying a ``start`` and/or
+``end`` in the call to :py:meth:`Function.over`. Additionally, Peewee comes
+with helper-methods on the :py:class:`Window` object for generating the
+appropriate boundary references:
+
+* :py:attr:`Window.CURRENT_ROW` - attribute that references the current row.
+* :py:meth:`Window.preceding` - specify number of row(s) preceding, or omit
+  number to indicate **all** preceding rows.
+* :py:meth:`Window.following` - specify number of row(s) following, or omit
+  number to indicate **all** following rows.
+
+To examine how boundaries work, we'll calculate a running total of the
+``value`` column, ordered with respect to ``id``, **but** we'll only look the
+running total of the current row and it's two preceding rows:
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).over(
+            order_by=[Sample.id],
+            start=Window.preceding(2),
+            end=Window.CURRENT_ROW).alias('rsum'))
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.rsum)
+
+    # 1    10.    10.
+    # 1    20.    30.  -- (20 + 10)
+    # 2     1.    31.  -- (1 + 20 + 10)
+    # 2     3.    24.  -- (3 + 1 + 20)
+    # 3   100    104.  -- (100 + 3 + 1)
+
+.. note::
+    Technically we did not need to specify the ``end=Window.CURRENT`` because
+    that is the default. It was shown in the example for demonstration.
+
+Let's look at another example. In this example we will calculate the "opposite"
+of a running total, in which the total sum of all values is decreased by the
+value of the samples, ordered by ``id``. To accomplish this, we'll calculate
+the sum from the current row to the last row.
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).over(
+            order_by=[Sample.id],
+            start=Window.CURRENT_ROW,
+            end=Window.following()).alias('rsum'))
+
+    # 1    10.   134.  -- (10 + 20 + 1 + 3 + 100)
+    # 1    20.   124.  -- (20 + 1 + 3 + 100)
+    # 2     1.   104.  -- (1 + 3 + 100)
+    # 2     3.   103.  -- (3 + 100)
+    # 3   100    100.  -- (100)
+
+Filtered Aggregates
+^^^^^^^^^^^^^^^^^^^
+
+Aggregate functions may also support filter functions (Postgres and Sqlite
+3.25+), which get translated into a ``FILTER (WHERE...)`` clause. Filter
+expressions are added to an aggregate function with the
+:py:meth:`Function.filter` method.
+
+For an example, we will calculate the running sum of the ``value`` field with
+respect to the ``id``, but we will filter-out any samples whose ``counter=2``.
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).filter(Sample.counter != 2).over(
+            order_by=[Sample.id]).alias('csum'))
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.csum)
+
+    # 1    10.    10.
+    # 1    20.    30.
+    # 2     1.    30.
+    # 2     3.    30.
+    # 3   100    130.
+
+.. note::
+    The call to :py:meth:`~Function.filter` must precede the call to
+    :py:meth:`~Function.over`.
+
+Reusing Window Definitions
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you intend to use the same window definition for multiple aggregates, you
+can create a :py:class:`Window` object. The :py:class:`Window` object takes the
+same parameters as :py:meth:`Function.over`, and can be passed to the
+``over()`` method in-place of the individual parameters.
+
+Here we'll declare a single window, ordered with respect to the sample ``id``,
+and call several window functions using that window definition:
+
+.. code-block:: python
+
+    win = Window(order_by=[Sample.id])
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.LEAD(Sample.value).over(win),
+        fn.LAG(Sample.value).over(win),
+        fn.SUM(Sample.value).over(win)
+    ).window(win)  # Include our window definition in query.
+
+    for row in query.tuples():
+        print(row)
+
+    # counter  value  lead()  lag()  sum()
+    # 1          10.     20.   NULL    10.
+    # 1          20.      1.    10.    30.
+    # 2           1.      3.    20.    31.
+    # 2           3.    100.     1.    34.
+    # 3         100.    NULL     3.   134.
+
+Multiple window definitions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In the previous example, we saw how to declare a :py:class:`Window` definition
+and re-use it for multiple different aggregations. You can include as many
+window definitions as you need in your queries, but it is necessary to ensure
+each window has a unique alias:
+
+.. code-block:: python
+
+    w1 = Window(order_by=[Sample.id]).alias('w1')
+    w2 = Window(partition_by=[Sample.counter]).alias('w2')
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).over(w1).alias('rsum'),  # Running total.
+        fn.AVG(Sample.value).over(w2).alias('cavg')   # Avg per category.
+    ).window(w1, w2)  # Include our window definitions.
+
+    for sample in query:
+        print(sample.counter, sample.value, sample.rsum, sample.cavg)
+
+    # counter  value   rsum     cavg
+    # 1          10.     10.     15.
+    # 1          20.     30.     15.
+    # 2           1.     31.      2.
+    # 2           3.     34.      2.
+    # 3         100     134.    100.
+
+.. _window-frame-types:
+
+Frame types: RANGE vs ROWS
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Depending on the frame type, the database will process ordered groups
+differently. Let's create two additional ``Sample`` rows to visualize the
+difference:
+
+.. code-block:: pycon
+
+    >>> Sample.create(counter=1, value=20.)
+    <Sample 6>
+    >>> Sample.create(counter=2, value=1.)
+    <Sample 7>
+
+Our table now contains:
+
+=== ======== ======
+id  counter  value
+=== ======== ======
+1   1        10.0
+2   1        20.0
+3   2        1.0
+4   2        3.0
+5   3        100.0
+6   1        20.0
+7   2        1.0
+=== ======== ======
+
+Let's examine the difference by calculating a "running sum" of the samples,
+ordered with respect to the ``counter`` and ``value`` fields. To specify the
+frame type, we can use either:
+
+* :py:attr:`Window.RANGE`
+* :py:attr:`Window.ROWS`
+
+The behavior of :py:attr:`~Window.RANGE`, when there are logical duplicates,
+may lead to unexpected results:
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).over(
+            order_by=[Sample.counter, Sample.value],
+            frame_type=Window.RANGE).alias('rsum'))
+
+    for sample in query.order_by(Sample.counter, Sample.value):
+        print(sample.counter, sample.value, sample.rsum)
+
+    # counter  value   rsum
+    # 1          10.     10.
+    # 1          20.     50.
+    # 1          20.     50.
+    # 2           1.     52.
+    # 2           1.     52.
+    # 2           3.     55.
+    # 3         100     155.
+
+With the inclusion of the new rows we now have some rows that have duplicate
+``category`` and ``value`` values. The :py:attr:`~Window.RANGE` frame type
+causes these duplicates to be evaluated together rather than separately.
+
+The more expected result can be achieved by using :py:attr:`~Window.ROWS` as
+the frame-type:
+
+.. code-block:: python
+
+    query = Sample.select(
+        Sample.counter,
+        Sample.value,
+        fn.SUM(Sample.value).over(
+            order_by=[Sample.counter, Sample.value],
+            frame_type=Window.ROWS).alias('rsum'))
+
+    for sample in query.order_by(Sample.counter, Sample.value):
+        print(sample.counter, sample.value, sample.rsum)
+
+    # counter  value   rsum
+    # 1          10.     10.
+    # 1          20.     30.
+    # 1          20.     50.
+    # 2           1.     51.
+    # 2           1.     52.
+    # 2           3.     55.
+    # 3         100     155.
+
+Peewee uses these rules for determining what frame-type to use:
+
+* If the user specifies a ``frame_type``, that frame type will be used.
+* If ``start`` and/or ``end`` boundaries are specified Peewee will default to
+  using ``ROWS``.
+* If the user did not specify frame type or start/end boundaries, Peewee will
+  use the database default, which is ``RANGE``.
+
+.. note::
+    For information about the window function APIs, see:
+
+    * :py:meth:`Function.over`
+    * :py:meth:`Function.filter`
+    * :py:class:`Window`
+
+    For general information on window functions, the
+    `postgresql docs <http://www.postgresql.org/docs/9.1/static/tutorial-window.html>`_.
+    have a good overview.
 
 Retrieving row tuples / dictionaries / namedtuples
 --------------------------------------------------
@@ -1144,14 +1609,22 @@ Common Table Expressions
 ------------------------
 
 Peewee supports the inclusion of common table expressions (CTEs) in all types
-of queries. To declare a :py:class:`Select` query for use as a CTE, use
+of queries. CTEs may be useful for:
+
+* Factoring out a common subquery.
+* Grouping or filtering by a column derived in the CTE's result set.
+* Writing recursive queries.
+
+To declare a :py:class:`Select` query for use as a CTE, use
 :py:meth:`~SelectQuery.cte` method, which wraps the query in a :py:class:`CTE`
 object. To indicate that a :py:class:`CTE` should be included as part of a
 query, use the :py:meth:`Query.with_cte` method, passing a list of CTE objects.
 
+Simple Example
+^^^^^^^^^^^^^^
+
 For an example, let's say we have some data points that consist of a key and a
-floating-point value. We wish to, for each distinct key, find the values that
-were above-average for that key.
+floating-point value. Let's define our model and populate some test data:
 
 .. code-block:: python
 
@@ -1169,6 +1642,11 @@ were above-average for that key.
         Sample.insert_many([(key, value) for value in values],
                            fields=[Sample.key, Sample.value]).execute()
 
+Let's use a CTE to calculate, for each distinct key, which values were
+above-average for that key.
+
+.. code-block:: python
+
     # First we'll declare the query that will be used as a CTE. This query
     # simply determines the average value for each key.
     cte = (Sample
@@ -1180,18 +1658,85 @@ were above-average for that key.
     # exceeds the average for the given key. We'll calculate how far above the
     # average the given sample's value is, as well.
     query = (Sample
-             .select(Sample.key, (Sample.value - cte.c.avg_value).alias('diff'))
+             .select(Sample.key, Sample.value)
              .join(cte, on=(Sample.key == cte.c.key))
              .where(Sample.value > cte.c.avg_value)
              .order_by(Sample.value)
              .with_cte(cte))
 
-    for sample in query:
-        print(sample.key, sample.diff)
+We can iterate over the samples returned by the query to see which samples had
+above-average values for their given group:
 
-    # 'a', .25  -- for (a, 1.75)
-    # 'b', .2   -- for (b, 2.7)
-    # 'b', .4   -- for (b, 2.9)
+.. code-block:: pycon
+
+    >>> for sample in query:
+    ...     print(sample.key, sample.value)
+
+    # 'a', 1.75
+    # 'b', 2.7
+    # 'b', 2.9
+
+Complex Example
+^^^^^^^^^^^^^^^
+
+For a more complete example, let's consider the following query which uses
+multiple CTEs to find per-product sales totals in only the top sales regions.
+Our model looks like this:
+
+.. code-block:: python
+
+    class Order(Model):
+        region = TextField()
+        amount = FloatField()
+        product = TextField()
+        quantity = IntegerField()
+
+Here is how the query might be written in SQL. This example can be found in
+the `postgresql documentation <https://www.postgresql.org/docs/current/static/queries-with.html>`_.
+
+.. code-block:: sql
+
+    WITH regional_sales AS (
+        SELECT region, SUM(amount) AS total_sales
+        FROM orders
+        GROUP BY region
+      ), top_regions AS (
+        SELECT region
+        FROM regional_sales
+        WHERE total_sales > (SELECT SUM(total_sales) / 10 FROM regional_sales)
+      )
+    SELECT region,
+           product,
+           SUM(quantity) AS product_units,
+           SUM(amount) AS product_sales
+    FROM orders
+    WHERE region IN (SELECT region FROM top_regions)
+    GROUP BY region, product;
+
+With Peewee, we would write:
+
+.. code-block:: python
+
+    reg_sales = (Order
+                 .select(Order.region,
+                         fn.SUM(Order.amount).alias('total_sales'))
+                 .group_by(Order.region)
+                 .cte('regional_sales'))
+
+    top_regions = (reg_sales
+                   .select(reg_sales.c.region)
+                   .where(reg_sales.c.total_sales > (
+                       reg_sales.select(fn.SUM(reg_sales.c.total_sales) / 10)))
+                   .cte('top_regions'))
+
+    query = (Order
+             .select(Order.region,
+                     Order.product,
+                     fn.SUM(Order.quantity).alias('product_units'),
+                     fn.SUM(Order.amount).alias('product_sales'))
+             .where(Order.region.in_(top_regions.select(top_regions.c.region)))
+             .group_by(Order.region, Order.product)
+             .with_cte(regional_sales, top_regions))
 
 Recursive CTEs
 ^^^^^^^^^^^^^^
@@ -1202,13 +1747,19 @@ Suppose, for example, that we have a hierarchy of categories for an online
 bookstore. We wish to generate a table showing all categories and their
 absolute depths, along with the path from the root to the category.
 
-For this, we can use a recursive CTE:
+We'll assume the following model definition, in which each category has a
+foreign-key to its immediate parent category:
 
 .. code-block:: python
 
     class Category(Model):
         name = TextField()
         parent = ForeignKeyField('self', backref='children', null=True)
+
+To list all categories along with their depth and parents, we can use a
+recursive CTE:
+
+.. code-block:: python
 
     # Define the base case of our recursive CTE. This will be categories that
     # have a null parent foreign-key.

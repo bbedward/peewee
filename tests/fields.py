@@ -245,6 +245,18 @@ class TestDateFields(ModelTestCase):
                 2011., 1., 2., 11., 12., 13.054321, 2012., 2., 3., 3., 13.,
                 37.))
 
+    def test_distinct_date_part(self):
+        years = (1980, 1990, 2000, 2010)
+        for i, year in enumerate(years):
+            for j in range(i + 1):
+                DateModel.create(date=datetime.date(year, i + 1, 1))
+
+        query = (DateModel
+                 .select(DateModel.date.year.distinct())
+                 .order_by(DateModel.date.year))
+        self.assertEqual([year for year, in query.tuples()],
+                         [1980, 1990, 2000, 2010])
+
 
 class U2(TestModel):
     username = TextField()
@@ -391,7 +403,7 @@ class TestFieldFunction(ModelTestCase):
                  .order_by(PB.name))
         self.assertSQL(query, (
             'SELECT "t1"."id", "t1"."name" '
-            'FROM "phonebook" AS "t1" '
+            'FROM "phone_book" AS "t1" '
             'WHERE (SUBSTR("t1"."name", ?, ?) = ?) '
             'ORDER BY "t1"."name"'), [1, 1, 'h'])
 
@@ -691,6 +703,20 @@ class TestUUIDField(ModelTestCase):
         u_db2 = UUIDModel.get(UUIDModel.data == uu)
         self.assertEqual(u_db2.id, u.id)
 
+        # Verify we can use hex string.
+        uu = uuid.uuid4()
+        u = UUIDModel.create(data=uu.hex)
+        u_db = UUIDModel.get(UUIDModel.data == uu.hex)
+        self.assertEqual(u.id, u_db.id)
+        self.assertEqual(u_db.data, uu)
+
+        # Verify we can use raw binary representation.
+        uu = uuid.uuid4()
+        u = UUIDModel.create(data=uu.bytes)
+        u_db = UUIDModel.get(UUIDModel.data == uu.bytes)
+        self.assertEqual(u.id, u_db.id)
+        self.assertEqual(u_db.data, uu)
+
     def test_binary_uuid_field(self):
         uu = uuid.uuid4()
         u = UUIDModel.create(bdata=uu)
@@ -701,6 +727,40 @@ class TestUUIDField(ModelTestCase):
 
         u_db2 = UUIDModel.get(UUIDModel.bdata == uu)
         self.assertEqual(u_db2.id, u.id)
+
+        # Verify we can use hex string.
+        uu = uuid.uuid4()
+        u = UUIDModel.create(bdata=uu.hex)
+        u_db = UUIDModel.get(UUIDModel.bdata == uu.hex)
+        self.assertEqual(u.id, u_db.id)
+        self.assertEqual(u_db.bdata, uu)
+
+        # Verify we can use raw binary representation.
+        uu = uuid.uuid4()
+        u = UUIDModel.create(bdata=uu.bytes)
+        u_db = UUIDModel.get(UUIDModel.bdata == uu.bytes)
+        self.assertEqual(u.id, u_db.id)
+        self.assertEqual(u_db.bdata, uu)
+
+
+class TSModel(TestModel):
+    ts_s = TimestampField()
+    ts_us = TimestampField(resolution=10 ** 6)
+
+
+class TestTimestampField(ModelTestCase):
+    requires = [TSModel]
+
+    def test_timestamp_field(self):
+        dt = datetime.datetime(2018, 3, 1, 3, 3, 7)
+        dt = dt.replace(microsecond=31337)
+        ts = TSModel.create(ts_s=dt, ts_us=dt)
+        ts_db = TSModel.get(TSModel.id == ts.id)
+        self.assertEqual(ts_db.ts_s, dt.replace(microsecond=0))
+        self.assertEqual(ts_db.ts_us, dt)
+
+        self.assertEqual(TSModel.get(TSModel.ts_s == dt).id, ts.id)
+        self.assertEqual(TSModel.get(TSModel.ts_us == dt).id, ts.id)
 
 
 class ListField(TextField):

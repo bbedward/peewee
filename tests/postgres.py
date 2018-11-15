@@ -1,5 +1,6 @@
 #coding:utf-8
 import datetime
+import uuid
 from decimal import Decimal as Dc
 from types import MethodType
 
@@ -27,6 +28,12 @@ D = HStoreModel.data
 class ArrayModel(TestModel):
     tags = ArrayField(CharField)
     ints = ArrayField(IntegerField, dimensions=2)
+
+
+class UUIDList(TestModel):
+    key = CharField()
+    id_list = ArrayField(BinaryUUIDField, convert_values=True, index=False)
+    id_list_native = ArrayField(UUIDField, index=False)
 
 
 class ArrayTSModel(TestModel):
@@ -354,6 +361,31 @@ class TestArrayFieldConvertValues(ModelTestCase):
                           ArrayTSModel.timestamps.contains(dt(4, 5, 6)))
 
 
+class TestArrayUUIDField(ModelTestCase):
+    database = db
+    requires = [UUIDList]
+
+    def setUp(self):
+        super(TestArrayUUIDField, self).setUp()
+        import psycopg2.extras
+        psycopg2.extras.register_uuid()
+
+    def test_array_of_uuids(self):
+        u1, u2, u3, u4 = [uuid.uuid4() for _ in range(4)]
+        a = UUIDList.create(key='a', id_list=[u1, u2, u3],
+                            id_list_native=[u1, u2, u3])
+        b = UUIDList.create(key='b', id_list=[u2, u3, u4],
+                            id_list_native=[u2, u3, u4])
+        a_db = UUIDList.get(UUIDList.key == 'a')
+        b_db = UUIDList.get(UUIDList.key == 'b')
+
+        self.assertEqual(a.id_list, [u1, u2, u3])
+        self.assertEqual(b.id_list, [u2, u3, u4])
+
+        self.assertEqual(a.id_list_native, [u1, u2, u3])
+        self.assertEqual(b.id_list_native, [u2, u3, u4])
+
+
 class TestTSVectorField(ModelTestCase):
     database = db
     requires = [FTSModel]
@@ -382,7 +414,7 @@ class TestTSVectorField(ModelTestCase):
         query = FTSModel.select().where(Match(FTSModel.data, 'foo bar'))
         self.assertSQL(query, (
             'SELECT "t1"."id", "t1"."title", "t1"."data", "t1"."fts_data" '
-            'FROM "ftsmodel" AS "t1" '
+            'FROM "fts_model" AS "t1" '
             'WHERE (to_tsvector("t1"."data") @@ to_tsquery(?))'), ['foo bar'])
 
     def test_match_function(self):
@@ -776,7 +808,7 @@ class TestIndexedField(BaseTestCase):
 
         create_sql, _ = IndexedModel._schema._create_table(False).query()
         self.assertEqual(create_sql, (
-            'CREATE TABLE "indexedmodel" ('
+            'CREATE TABLE "indexed_model" ('
             '"id" SERIAL NOT NULL PRIMARY KEY, '
             '"array_index" VARCHAR(255)[] NOT NULL, '
             '"array_noindex" INTEGER[] NOT NULL, '
@@ -787,12 +819,12 @@ class TestIndexedField(BaseTestCase):
         indexes = [idx.query()[0]
                    for idx in IndexedModel._schema._create_indexes(False)]
         self.assertEqual(indexes, [
-            ('CREATE INDEX "indexedmodel_array_index" ON "indexedmodel" '
+            ('CREATE INDEX "indexed_model_array_index" ON "indexed_model" '
              'USING GIN ("array_index")'),
-            ('CREATE INDEX "indexedmodel_fake_index" ON "indexedmodel" '
+            ('CREATE INDEX "indexed_model_fake_index" ON "indexed_model" '
              'USING GiST ("fake_index")'),
-            ('CREATE INDEX "indexedmodel_fake_index_with_type" '
-             'ON "indexedmodel" '
+            ('CREATE INDEX "indexed_model_fake_index_with_type" '
+             'ON "indexed_model" '
              'USING MAGIC ("fake_index_with_type")')])
 
 

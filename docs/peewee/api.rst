@@ -1,7 +1,5 @@
 .. _api:
 
-.. include:: help-request.rst
-
 API Documentation
 =================
 
@@ -343,7 +341,7 @@ Database
 
         Example::
 
-            print db.get_indexes('entry')
+            print(db.get_indexes('entry'))
             [IndexMetadata(
                  name='entry_public_list',
                  sql='CREATE INDEX "entry_public_list" ...',
@@ -366,7 +364,7 @@ Database
 
         Example::
 
-            print db.get_columns('entry')
+            print(db.get_columns('entry'))
             [ColumnMetadata(
                  name='id',
                  data_type='INTEGER',
@@ -390,7 +388,7 @@ Database
 
         Example::
 
-            print db.get_primary_keys('entry')
+            print(db.get_primary_keys('entry'))
             ['id']
 
     .. py:method:: get_foreign_keys(table[, schema=None])
@@ -403,12 +401,27 @@ Database
 
         Example::
 
-            print db.get_foreign_keys('entrytag')
+            print(db.get_foreign_keys('entrytag'))
             [ForeignKeyMetadata(
                  column='entry_id',
                  dest_table='entry',
                  dest_column='id',
                  table='entrytag'),
+             ...]
+
+    .. py:method:: get_views([schema=None])
+
+        :param str schema: Schema name (optional).
+
+        Return a list of :py:class:`ViewMetadata` tuples for VIEWs present in
+        the database.
+
+        Example::
+
+            print(db.get_views())
+            [ViewMetadata(
+                 name='entries_public',
+                 sql='CREATE VIEW entries_public AS SELECT ... '),
              ...]
 
     .. py:method:: sequence_exists(seq)
@@ -593,7 +606,9 @@ Database
 
         Class decorator to register a user-defined aggregate function.
 
-        Example::
+        Example:
+
+        .. code-block:: python
 
             @db.aggregate('md5')
             class MD5(object):
@@ -635,7 +650,9 @@ Database
 
         Decorator to register a user-defined collation.
 
-        Example::
+        Example:
+
+        .. code-block:: python
 
             @db.collation('reverse')
             def collate_reverse(s1, s2):
@@ -672,7 +689,9 @@ Database
 
         Decorator to register a user-defined scalar function.
 
-        Example::
+        Example:
+
+        .. code-block:: python
 
             @db.func('title_case')
             def title_case(s):
@@ -680,6 +699,58 @@ Database
 
             # Usage:
             title_case_books = Book.select(fn.title_case(Book.title))
+
+    .. py:method:: register_window_function(klass[, name=None[, num_params=-1]])
+
+        :param klass: Class implementing window function API.
+        :param str name: Window function name (defaults to name of class).
+        :param int num_params: Number of parameters the function accepts, or
+            -1 for any number.
+
+        Register a user-defined window function.
+
+        .. attention::
+            This feature requires SQLite >= 3.25.0 **and**
+            `pysqlite3 <https://github.com/coleifer/pysqlite3>`_ >= 0.2.0.
+
+        The window function will be registered each time a new connection is
+        opened. Additionally, if a connection is already open, the window
+        function will be registered with the open connection.
+
+    .. py:method:: window_function([name=None[, num_params=-1]])
+
+        :param str name: Name of the window function (defaults to class name).
+        :param int num_params: Number of parameters the function accepts, or -1
+            for any number.
+
+        Class decorator to register a user-defined window function. Window
+        functions must define the following methods:
+
+        * ``step(<params>)`` - receive values from a row and update state.
+        * ``inverse(<params>)`` - inverse of ``step()`` for the given values.
+        * ``value()`` - return the current value of the window function.
+        * ``finalize()`` - return the final value of the window function.
+
+        Example:
+
+        .. code-block:: python
+
+            @db.window_function('my_sum')
+            class MySum(object):
+                def __init__(self):
+                    self._value = 0
+
+                def step(self, value):
+                    self._value += value
+
+                def inverse(self, value):
+                    self._value -= value
+
+                def value(self):
+                    return self._value
+
+                def finalize(self):
+                    return self._value
 
     .. py:method:: table_function([name=None])
 
@@ -850,7 +921,9 @@ Query-builder
 
     A source of row tuples, for example a table, join, or select query. By
     default provides a "magic" attribute named "c" that is a factory for
-    column/attribute lookups, for example::
+    column/attribute lookups, for example:
+
+    .. code-block:: python
 
         User = Table('users')
         query = (User
@@ -1305,12 +1378,14 @@ Query-builder
     Represent a CHECK constraint.
 
 
-.. py:class:: Function(name, arguments[, coerce=True])
+.. py:class:: Function(name, arguments[, coerce=True[, python_value=None]])
 
     :param str name: Function name.
     :param tuple arguments: Arguments to function.
     :param bool coerce: Whether to coerce the function result to a particular
         data-type when reading function return values from the cursor.
+    :param callable python_value: Function to use for converting the return
+        value from the cursor.
 
     Represent an arbitrary SQL function call.
 
@@ -1335,11 +1410,12 @@ Query-builder
             start of the window range.
         :param end: A :py:class:`SQL` instance or a string expressing the
             end of the window range.
+        :param str frame_type: ``Window.RANGE`` or ``Window.ROWS``.
         :param Window window: A :py:class:`Window` instance.
 
         .. note::
-            For simplicity, it is permissible to call ``over()`` with a
-            :py:class:`Window` instance as the first and only parameter.
+            For an in-depth guide to using window functions with Peewee,
+            see the :ref:`window-functions` section.
 
         Examples::
 
@@ -1366,13 +1442,56 @@ Query-builder
                      .select(Sample.value,
                              fn.SUM(Sample.value).over(
                                 partition_by=[Sample.counter],
-                                start=Window.preceding(),  # unbounded.
-                                end=Window.following(1)))  # 1 following.
+                                start=Window.CURRENT_ROW,  # current row
+                                end=Window.following()))  # unbounded following
                      .order_by(Sample.id))
+
+    .. py:method:: filter(where)
+
+        :param where: Expression for filtering aggregate.
+
+        Add a ``FILTER (WHERE...)`` clause to an aggregate function. The where
+        expression is evaluated to determine which rows are fed to the
+        aggregate function. This SQL feature is supported for Postgres and
+        SQLite.
 
     .. py:method:: coerce([coerce=True])
 
-        :param bool coerce: Whether to coerce function-call result.
+        :param bool coerce: Whether to attempt to coerce function-call result
+            to a Python data-type.
+
+        When coerce is ``True``, the target data-type is inferred using several
+        heuristics. Read the source for ``BaseModelCursorWrapper._initialize_columns``
+        method to see how this works.
+
+    .. py:method:: python_value([func=None])
+
+        :param callable python_value: Function to use for converting the return
+            value from the cursor.
+
+        Specify a particular function to use when converting values returned by
+        the database cursor. For example:
+
+        .. code-block:: python
+
+            # Get user and a list of their tweet IDs. The tweet IDs are
+            # returned as a comma-separated string by the db, so we'll split
+            # the result string and convert the values to python ints.
+            tweet_ids = (fn
+                         .GROUP_CONCAT(Tweet.id)
+                         .python_value(lambda idlist: [int(i) for i in idlist]))
+
+            query = (User
+                     .select(User.username, tweet_ids.alias('tweet_ids'))
+                     .group_by(User.username))
+
+            for user in query:
+                print(user.username, user.tweet_ids)
+
+            # e.g.,
+            # huey [1, 4, 5, 7]
+            # mickey [2, 3, 6]
+            # zaizee []
 
 .. py:function:: fn()
 
@@ -1406,7 +1525,7 @@ Query-builder
         # Get users whose username begins with "A" or "a":
         a_users = User.select().where(fn.LOWER(fn.SUBSTR(User.username, 1, 1)) == 'a')
 
-.. py:class:: Window([partition_by=None[, order_by=None[, start=None[, end=None[, alias=None]]]]])
+.. py:class:: Window([partition_by=None[, order_by=None[, start=None[, end=None[, frame_type=None[, alias=None]]]]]])
 
     :param list partition_by: List of columns to partition by.
     :param list order_by: List of columns to order by.
@@ -1414,17 +1533,35 @@ Query-builder
         of the window range.
     :param end: A :py:class:`SQL` instance or a string expressing the end of
         the window range.
+    :param str frame_type: ``Window.RANGE`` or ``Window.ROWS``.
     :param str alias: Alias for the window.
 
     Represent a WINDOW clause.
 
+    .. note::
+        For an in-depth guide to using window functions with Peewee,
+        see the :ref:`window-functions` section.
+
     .. py:attribute:: CURRENT_ROW
 
-        Handy reference to current row for use in start/end clause.
+        Reference to current row for use in start/end clause.
 
-    .. py:method:: alias([alias=None])
+    .. py:attribute:: RANGE
 
-        :param str alias: Alias to use for window.
+        Specify the use of *RANGE* for the window ``frame_type``. For more
+        information, see :ref:`window-frame-types`.
+
+    .. py:attribute:: ROWS
+
+        Specify the use of *ROWS* for the window ``frame_type``. For more
+        information, see :ref:`window-frame-types`.
+
+    .. py:staticmethod:: preceding([value=None])
+
+        :param value: Number of rows preceding. If ``None`` is UNBOUNDED.
+
+        Convenience method for generating SQL suitable for passing in as the
+        ``start`` parameter for a window range.
 
     .. py:staticmethod:: following([value=None])
 
@@ -1433,12 +1570,9 @@ Query-builder
         Convenience method for generating SQL suitable for passing in as the
         ``end`` parameter for a window range.
 
-    .. py:staticmethod:: preceding([value=None])
+    .. py:method:: alias([alias=None])
 
-        :param value: Number of rows preceding. If ``None`` is UNBOUNDED.
-
-        Convenience method for generating SQL suitable for passing in as the
-        ``start`` parameter for a window range.
+        :param str alias: Alias to use for window.
 
 
 .. py:function:: Case(predicate, expression_tuples[, default=None]])
@@ -1522,13 +1656,15 @@ Query-builder
     Represent a SQL row tuple.
 
 
-.. py:class:: OnConflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None]]]]])
+.. py:class:: OnConflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None[, conflict_constraint=None]]]]]])
 
     :param str action: Action to take when resolving conflict.
     :param update: A dictionary mapping column to new value.
     :param preserve: A list of columns whose values should be preserved from the original INSERT.
     :param where: Expression to restrict the conflict resolution.
-    :param conflict_target: Name of column or constraint to check.
+    :param conflict_target: Column(s) to check.
+    :param str conflict_constraint: Name of constraint to use for conflict
+        resolution. Currently only supported by Postgres.
 
     Represent a conflict resolution clause for a data-modification query.
 
@@ -1554,8 +1690,12 @@ Query-builder
 
     .. py:method:: conflict_target(*constraints)
 
-        :param constraints: Name(s) of columns/constraints that are the target
-            of the conflict resolution.
+        :param constraints: Column(s) to use as target for conflict resolution.
+
+    .. py:method:: conflict_constraint(constraint)
+
+        :param str constraint: Name of constraints to use as target for
+            conflict resolution. Currently only supported by Postgres.
 
 
 .. py:class:: BaseQuery()
@@ -2134,13 +2274,58 @@ Query-builder
 
     Class representing an UPDATE query.
 
-    Example::
+    Example:
+
+    .. code-block:: python
 
         PageView = Table('page_views')
         query = (PageView
                  .update({PageView.c.page_views: PageView.c.page_views + 1})
                  .where(PageView.c.url == url))
         query.execute(database)
+
+    .. py:method:: from_(*sources)
+
+        :param Source sources: one or more :py:class:`Table`,
+            :py:class:`Model`, query, or :py:class:`ValuesList` to join with.
+
+        Specify additional tables to join with using the UPDATE ... FROM
+        syntax, which is supported by Postgres. The `Postgres documentation <https://www.postgresql.org/docs/10/static/sql-update.html#id-1.9.3.176.8>`_
+        provides additional detail, but to summarize:
+
+            When a ``FROM`` clause is present, what essentially happens is that
+            the target table is joined to the tables mentioned in the
+            from_list, and each output row of the join represents an update
+            operation for the target table. When using ``FROM`` you should
+            ensure that the join produces at most one output row for each row
+            to be modified.
+
+        Example:
+
+        .. code-block:: python
+
+            # Update multiple users in a single query.
+            data = [('huey', True),
+                    ('mickey', False),
+                    ('zaizee', True)]
+            vl = ValuesList(data, columns=('username', 'is_admin'), alias='vl')
+
+            # Here we'll update the "is_admin" status of the above users,
+            # "joining" the VALUES() on the "username" column.
+            query = (User
+                     .update(is_admin=vl.c.is_admin)
+                     .from_(vl)
+                     .where(User.username == vl.c.username))
+
+        The above query produces the following SQL:
+
+        .. code-block:: sql
+
+            UPDATE "users" SET "is_admin" = "vl"."is_admin"
+            FROM (
+                VALUES ('huey', t), ('mickey', f), ('zaizee', t))
+                AS "vl"("username", "is_admin")
+            WHERE ("users"."username" = "vl"."username")
 
 
 .. py:class:: Insert(table[, insert=None[, columns=None[, on_conflict=None[, **kwargs]]]])
@@ -2164,14 +2349,16 @@ Query-builder
 
         Specify REPLACE conflict resolution strategy.
 
-    .. py:method:: on_conflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None]]]]])
+    .. py:method:: on_conflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None[, conflict_constraint=None]]]]]])
 
         :param str action: Action to take when resolving conflict. If blank,
             action is assumed to be "update".
         :param update: A dictionary mapping column to new value.
         :param preserve: A list of columns whose values should be preserved from the original INSERT.
         :param where: Expression to restrict the conflict resolution.
-        :param conflict_target: Name of column or constraint to check.
+        :param conflict_target: Column(s) to check.
+        :param str conflict_constraint: Name of constraint to use for conflict
+            resolution. Currently only supported by Postgres.
 
         Specify the parameters for an :py:class:`OnConflict` clause to use for
         conflict resolution.
@@ -2382,6 +2569,19 @@ Fields
 .. py:class:: BigAutoField
 
     Field class for storing auto-incrementing primary keys using 64-bits.
+
+.. py:class:: IdentityField
+
+    Field class for storing auto-incrementing primary keys using the new
+    Postgres 10 *IDENTITY* column type. The column definition ends up looking
+    like this:
+
+    .. code-block:: python
+
+        id = IdentityField()
+        # "id" INT GENERATED BY DEFAULT AS IDENTITY NOT NULL PRIMARY KEY
+
+    .. attention:: Only supported by Postgres 10.0 and newer.
 
 .. py:class:: FloatField
 
@@ -2798,13 +2998,17 @@ Fields
     ``Husband.wife`` is automatically resolved and turned into a regular
     :py:class:`ForeignKeyField`.
 
-.. py:class:: ManyToManyField(model[, backref=None[, through_model=None]])
+.. py:class:: ManyToManyField(model[, backref=None[, through_model=None[, on_delete=None[, on_update=None]]]])
 
     :param Model model: Model to create relationship with.
     :param str backref: Accessor name for back-reference
     :param Model through_model: :py:class:`Model` to use for the intermediary
         table. If not provided, a simple through table will be automatically
         created.
+    :param str on_delete: ON DELETE action, e.g. ``'CASCADE'``. Will be used
+        for foreign-keys in through model.
+    :param str on_update: ON UPDATE action. Will be used for foreign-keys in
+        through model.
 
     The :py:class:`ManyToManyField` provides a simple interface for working
     with many-to-many relationships, inspired by Django. A many-to-many
@@ -3563,6 +3767,51 @@ Model
         .. note::
             The create() method is a shorthand for instantiate-then-save.
 
+    .. py:classmethod:: bulk_create(model_list[, batch_size=None])
+
+        :param iterable model_list: a list or other iterable of unsaved
+            :py:class:`Model` instances.
+        :param int batch_size: number of rows to batch per insert. If
+            unspecified, all models will be inserted in a single query.
+        :returns: no return value.
+
+        Efficiently INSERT multiple unsaved model instances into the database.
+        Unlike :py:meth:`~Model.insert_many`, which accepts row data as a list
+        of either dictionaries or lists, this method accepts a list of unsaved
+        model instances.
+
+        Example:
+
+        .. code-block:: python
+
+            # List of 10 unsaved users.
+            user_list = [User(username='u%s' % i) for i in range(10)]
+
+            # All 10 users are inserted in a single query.
+            User.bulk_create(user_list)
+
+        Batches:
+
+        .. code-block:: python
+
+            user_list = [User(username='u%s' % i) for i in range(10)]
+
+            with database.atomic():
+                # Will execute 4 INSERT queries (3 batches of 3, 1 batch of 1).
+                User.bulk_create(user_list, batch_size=3)
+
+        .. warning::
+
+            * The primary-key value for the newly-created models will only be
+              set if you are using Postgresql (which supports the ``RETURNING``
+              clause).
+            * SQLite generally has a limit of 999 bound parameters for a query,
+              so the batch size should be roughly 1000 / number-of-fields.
+            * When a batch-size is provided it is **strongly recommended** that
+              you wrap the call in a transaction or savepoint using
+              :py:meth:`Database.atomic`. Otherwise an error in a batch mid-way
+              through could leave the database in an inconsistent state.
+
     .. py:classmethod:: get(*query, **filters)
 
         :param query: Zero or more :py:class:`Expression` objects.
@@ -3642,7 +3891,8 @@ Model
 
         :param kwargs: Mapping of field-name to value.
         :param defaults: Default values to use if creating a new row.
-        :returns: :py:class:`Model` instance.
+        :returns: Tuple of :py:class:`Model` instance and boolean indicating
+            if a new object was created.
 
         Attempt to get the row matching the given filters. If no matching row
         is found, create a new row.
@@ -3724,6 +3974,12 @@ Model
                     class Meta:
                         database = db
                         only_save_dirty = True
+
+        .. warning::
+            Peewee determines whether a field is "dirty" by observing when the
+            field attribute is set on a model instance. If the field contains a
+            value that is mutable, such as a dictionary instance, and that
+            dictionary is then modified, Peewee will not notice the change.
 
     .. py:method:: is_dirty()
 
@@ -4038,6 +4294,7 @@ Model
 
         :param subqueries: A list of :py:class:`Model` classes or select
             queries to prefetch.
+        :returns: a list of models with selected relations prefetched.
 
         Execute the query, prefetching the given additional resources.
 
@@ -4060,6 +4317,7 @@ Model
     :param sq: Query to use as starting-point.
     :param subqueries: One or more models or :py:class:`ModelSelect` queries
         to eagerly fetch.
+    :returns: a list of models with selected relations prefetched.
 
     Eagerly fetch related objects, allowing efficient querying of multiple
     tables when a 1-to-many relationship exists.
@@ -4252,3 +4510,26 @@ Constants and Helpers
 
         Add a callback to be executed when the proxy is initialized.
 
+.. py:function:: chunked(iterable, n)
+
+    :param iterable: an iterable that is the source of the data to be chunked.
+    :param int n: chunk size
+    :returns: a new iterable that yields *n*-length chunks of the source data.
+
+    Efficient implementation for breaking up large lists of data into
+    smaller-sized chunks.
+
+    Usage:
+
+    .. code-block:: python
+
+        it = range(10)  # An iterable that yields 0...9.
+
+        # Break the iterable into chunks of length 4.
+        for chunk in chunked(it, 4):
+            print(', '.join(str(num) for num in chunk))
+
+        # PRINTS:
+        # 0, 1, 2, 3
+        # 4, 5, 6, 7
+        # 8, 9

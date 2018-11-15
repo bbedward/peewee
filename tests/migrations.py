@@ -4,15 +4,16 @@ from functools import partial
 
 from peewee import *
 from playhouse.migrate import *
-from playhouse.postgres_ext import BinaryJSONField
 from .base import BaseTestCase
 from .base import IS_MYSQL
+from .base import IS_SQLITE
 from .base import ModelTestCase
 from .base import TestModel
 from .base import db
 from .base import requires_models
 from .base import requires_postgresql
 from .base import requires_sqlite
+from .base import skip_if
 
 try:
     from psycopg2cffi import compat
@@ -80,6 +81,67 @@ class TestSchemaMigration(ModelTestCase):
         finally:
             self.database.close()
 
+    @requires_postgresql
+    def test_add_table_constraint(self):
+        price = FloatField(default=0.)
+        migrate(self.migrator.add_column('tag', 'price', price),
+                self.migrator.add_constraint('tag', 'price_check',
+                                             Check('price >= 0')))
+        class Tag2(Model):
+            tag = CharField()
+            price = FloatField(default=0.)
+            class Meta:
+                database = self.database
+                table_name = Tag._meta.table_name
+
+        with self.database.atomic():
+            self.assertRaises(IntegrityError, Tag2.create, tag='t1', price=-1)
+
+        Tag2.create(tag='t1', price=1.0)
+        t1_db = Tag2.get(Tag2.tag == 't1')
+        self.assertEqual(t1_db.price, 1.0)
+
+    @skip_if(IS_SQLITE)
+    def test_add_unique(self):
+        alt_id = IntegerField(default=0)
+        migrate(
+            self.migrator.add_column('tag', 'alt_id', alt_id),
+            self.migrator.add_unique('tag', 'alt_id'))
+
+        class Tag2(Model):
+            tag = CharField()
+            alt_id = IntegerField(default=0)
+            class Meta:
+                database = self.database
+                table_name = Tag._meta.table_name
+
+        Tag2.create(tag='t1', alt_id=1)
+        with self.database.atomic():
+            self.assertRaises(IntegrityError, Tag2.create, tag='t2', alt_id=1)
+
+    @requires_postgresql
+    def test_drop_table_constraint(self):
+        price = FloatField(default=0.)
+        migrate(
+            self.migrator.add_column('tag', 'price', price),
+            self.migrator.add_constraint('tag', 'price_check',
+                                         Check('price >= 0')))
+
+        class Tag2(Model):
+            tag = CharField()
+            price = FloatField(default=0.)
+            class Meta:
+                database = self.database
+                table_name = Tag._meta.table_name
+
+        with self.database.atomic():
+            self.assertRaises(IntegrityError, Tag2.create, tag='t1', price=-1)
+
+        migrate(self.migrator.drop_constraint('tag', 'price_check'))
+        Tag2.create(tag='t1', price=-1)
+        t1_db = Tag2.get(Tag2.tag == 't1')
+        self.assertEqual(t1_db.price, -1.0)
+
     def test_add_column(self):
         # Create some fields with a variety of NULL / default values.
         df = DateTimeField(null=True)
@@ -133,6 +195,36 @@ class TestSchemaMigration(ModelTestCase):
             (t1.id, 't1', None, datetime.datetime(2012, 1, 1), '', True, 0.0),
             (t2.id, 't2', None, datetime.datetime(2012, 1, 1), '', True, 0.0),
         ])
+
+    @skip_if(IS_MYSQL, 'mysql does not support CHECK()')
+    def test_add_column_constraint(self):
+        cf = CharField(null=True, constraints=[SQL('default \'foo\'')])
+        ff = FloatField(default=0., constraints=[Check('val < 1.0')])
+        t1 = Tag.create(tag='t1')
+        migrate(
+            self.migrator.add_column('tag', 'misc', cf),
+            self.migrator.add_column('tag', 'val', ff))
+
+        class NewTag(Model):
+            tag = CharField()
+            misc = CharField()
+            val = FloatField()
+            class Meta:
+                database = self.database
+                table_name = Tag._meta.table_name
+
+        t1_db = NewTag.get(NewTag.tag == 't1')
+        self.assertEqual(t1_db.misc, 'foo')
+        self.assertEqual(t1_db.val, 0.)
+
+        with self.database.atomic():
+            self.assertRaises(IntegrityError, NewTag.create, tag='t2',
+                              misc='bar', val=2.)
+
+        NewTag.create(tag='t3', misc='baz', val=0.9)
+        t3_db = NewTag.get(NewTag.tag == 't3')
+        self.assertEqual(t3_db.misc, 'baz')
+        self.assertEqual(t3_db.val, 0.9)
 
     def _create_people(self):
         for first, last, dob in self._person_data:
@@ -502,6 +594,7 @@ class TestSchemaMigration(ModelTestCase):
     @requires_postgresql
     @requires_models(Tag)
     def test_add_column_with_index_type(self):
+        from playhouse.postgres_ext import BinaryJSONField
         self.reset_sql_history()
         field = BinaryJSONField(default=dict, index=True, null=True)
         migrate(self.migrator.add_column('tag', 'metadata', field))
@@ -536,28 +629,29 @@ class TestSchemaMigration(ModelTestCase):
         column_names = self.get_column_names('page')
         self.assertEqual(column_names, set(['id', 'user_id', 'testing']))
 
-        migrate(self.migrator.drop_column('indeXmOdel', 'first_name'))
-        indexes = self.migrator.database.get_indexes('indexmodel')
+        migrate(self.migrator.drop_column('indeX_mOdel', 'first_name'))
+        indexes = self.migrator.database.get_indexes('index_model')
         self.assertEqual(len(indexes), 1)
-        self.assertEqual(indexes[0].name, 'indexmodel_data')
+        self.assertEqual(indexes[0].name, 'index_model_data')
 
     @requires_sqlite
     @requires_models(IndexModel)
     def test_add_column_indexed_table(self):
         # Ensure that columns can be added to tables that have indexes.
         field = CharField(default='')
-        migrate(self.migrator.add_column('indexmodel', 'foo', field))
+        migrate(self.migrator.add_column('index_model', 'foo', field))
 
         db = self.migrator.database
-        columns = db.get_columns('indexmodel')
+        columns = db.get_columns('index_model')
         self.assertEqual(sorted(column.name for column in columns),
                          ['data', 'first_name', 'foo', 'id', 'last_name'])
 
-        indexes = db.get_indexes('indexmodel')
+        indexes = db.get_indexes('index_model')
         self.assertEqual(
             sorted((index.name, index.columns) for index in indexes),
-            [('indexmodel_data', ['data']),
-             ('indexmodel_first_name_last_name', ['first_name', 'last_name'])])
+            [('index_model_data', ['data']),
+             ('index_model_first_name_last_name',
+              ['first_name', 'last_name'])])
 
     @requires_sqlite
     def test_rename_column_to_table_name(self):
@@ -605,57 +699,124 @@ class TestSchemaMigration(ModelTestCase):
     def test_index_preservation(self):
         self.reset_sql_history()
         migrate(self.migrator.rename_column(
-            'indexmodel',
+            'index_model',
             'first_name',
             'first'))
 
         queries = [x.msg for x in self.history]
         self.assertEqual(queries, [
             # Get all the columns.
-            ('PRAGMA "main".table_info("indexmodel")', None),
+            ('PRAGMA "main".table_info("index_model")', None),
 
             # Get the table definition.
             ('select name, sql from sqlite_master '
              'where type=? and LOWER(name)=?',
-             ['table', 'indexmodel']),
+             ['table', 'index_model']),
 
             # Get the indexes and indexed columns for the table.
             ('SELECT name, sql FROM "main".sqlite_master '
              'WHERE tbl_name = ? AND type = ? ORDER BY name',
-             ('indexmodel', 'index')),
-            ('PRAGMA "main".index_list("indexmodel")', None),
-            ('PRAGMA "main".index_info("indexmodel_data")', None),
-            ('PRAGMA "main".index_info("indexmodel_first_name_last_name")',
+             ('index_model', 'index')),
+            ('PRAGMA "main".index_list("index_model")', None),
+            ('PRAGMA "main".index_info("index_model_data")', None),
+            ('PRAGMA "main".index_info("index_model_first_name_last_name")',
              None),
 
             # Get foreign keys.
-            ('PRAGMA "main".foreign_key_list("indexmodel")', None),
+            ('PRAGMA "main".foreign_key_list("index_model")', None),
 
             # Drop any temporary table, if it exists.
-            ('DROP TABLE IF EXISTS "indexmodel__tmp__"', []),
+            ('DROP TABLE IF EXISTS "index_model__tmp__"', []),
 
             # Create a temporary table with the renamed column.
-            ('CREATE TABLE "indexmodel__tmp__" ('
+            ('CREATE TABLE "index_model__tmp__" ('
              '"id" INTEGER NOT NULL PRIMARY KEY, '
              '"first" VARCHAR(255) NOT NULL, '
              '"last_name" VARCHAR(255) NOT NULL, '
              '"data" INTEGER NOT NULL)', []),
 
             # Copy data from original table into temporary table.
-            ('INSERT INTO "indexmodel__tmp__" '
+            ('INSERT INTO "index_model__tmp__" '
              '("id", "first", "last_name", "data") '
              'SELECT "id", "first_name", "last_name", "data" '
-             'FROM "indexmodel"', []),
+             'FROM "index_model"', []),
 
             # Drop the original table.
-            ('DROP TABLE "indexmodel"', []),
+            ('DROP TABLE "index_model"', []),
 
             # Rename the temporary table, replacing the original.
-            ('ALTER TABLE "indexmodel__tmp__" RENAME TO "indexmodel"', []),
+            ('ALTER TABLE "index_model__tmp__" RENAME TO "index_model"', []),
 
             # Re-create the indexes.
-            ('CREATE UNIQUE INDEX "indexmodel_data" '
-             'ON "indexmodel" ("data")', []),
-            ('CREATE UNIQUE INDEX "indexmodel_first_name_last_name" '
-             'ON "indexmodel" ("first", "last_name")', [])
+            ('CREATE UNIQUE INDEX "index_model_data" '
+             'ON "index_model" ("data")', []),
+            ('CREATE UNIQUE INDEX "index_model_first_name_last_name" '
+             'ON "index_model" ("first", "last_name")', [])
         ])
+
+    @requires_sqlite
+    @requires_models(User, Page)
+    def test_modify_fk_constraint(self):
+        self.reset_sql_history()
+        new_fk = ForeignKeyField(User, User.id, null=True, on_delete='CASCADE')
+        migrate(
+            self.migrator.drop_column('page', 'user_id'),
+            self.migrator.add_column('page', 'user_id', new_fk))
+
+        queries = [x.msg for x in self.history]
+        self.assertEqual(queries, [
+            # Get all columns for table.
+            ('PRAGMA "main".table_info("page")', None),
+
+            # Get the SQL used to generate the table and indexes.
+            ('select name, sql from sqlite_master '
+             'where type=? and LOWER(name)=?', ['table', 'page']),
+            ('SELECT name, sql FROM "main".sqlite_master '
+             'WHERE tbl_name = ? AND type = ? ORDER BY name',
+             ('page', 'index')),
+
+            # Get the indexes and indexed columns for the table.
+            ('PRAGMA "main".index_list("page")', None),
+            ('PRAGMA "main".index_info("page_name")', None),
+            ('PRAGMA "main".index_info("page_user_id")', None),
+            ('PRAGMA "main".foreign_key_list("page")', None),
+
+            # Clear out a temp table and create it w/o the user_id FK.
+            ('DROP TABLE IF EXISTS "page__tmp__"', []),
+            ('CREATE TABLE "page__tmp__" ('
+             '"id" INTEGER NOT NULL PRIMARY KEY, "name" VARCHAR(100))', []),
+
+            # Copy data into the temp table, drop the original and rename
+            # the temp -> original. Recreate index(es).
+            ('INSERT INTO "page__tmp__" ("id", "name") '
+             'SELECT "id", "name" FROM "page"', []),
+            ('DROP TABLE "page"', []),
+            ('ALTER TABLE "page__tmp__" RENAME TO "page"', []),
+            ('CREATE UNIQUE INDEX "page_name" ON "page" ("name")', []),
+
+            # Add new foreign-key field with appropriate constraint.
+            ('ALTER TABLE "page" ADD COLUMN "user_id" VARCHAR(20) '
+             'REFERENCES "users" ("id") ON DELETE CASCADE', []),
+        ])
+
+        self.database.pragma('foreign_keys', 1)
+        huey = User.create(id='huey')
+        huey_page = Page.create(user=huey, name='huey page')
+        self.assertEqual(Page.select().count(), 1)
+
+        # Deleting the user will cascade to the associated page.
+        User.delete().where(User.id == 'huey').execute()
+        self.assertEqual(Page.select().count(), 0)
+
+    def test_make_index_name(self):
+        self.assertEqual(make_index_name('table', ['column']), 'table_column')
+
+    def test_make_index_name_long(self):
+        columns = [
+            'very_long_column_name_number_1',
+            'very_long_column_name_number_2',
+            'very_long_column_name_number_3',
+            'very_long_column_name_number_4'
+        ]
+        name = make_index_name('very_long_table_name', columns)
+        self.assertEqual(len(name), 64)

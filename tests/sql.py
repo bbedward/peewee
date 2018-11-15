@@ -1,4 +1,5 @@
 import datetime
+import re
 
 from peewee import *
 from peewee import Expression
@@ -8,6 +9,7 @@ from .base import TestModel
 from .base import db
 from .base import requires_mysql
 from .base import requires_sqlite
+from .base import __sql__
 
 
 User = Table('users')
@@ -25,17 +27,6 @@ class TestSelectQuery(BaseTestCase):
             'SELECT "t1"."id", "t1"."username" '
             'FROM "users" AS "t1" '
             'WHERE ("t1"."username" = ?)'), ['foo'])
-
-    def test_select_subselect_function(self):
-        exists = fn.EXISTS(Tweet
-                           .select(Tweet.c.id)
-                           .where(Tweet.c.user_id == User.c.id))
-        query = User.select(User.c.username, exists.alias('has_tweet'))
-        self.assertSQL(query, (
-            'SELECT "t1"."username", EXISTS('
-            'SELECT "t2"."id" FROM "tweets" AS "t2" '
-            'WHERE ("t2"."user_id" = "t1"."id")) AS "has_tweet" '
-            'FROM "users" AS "t1"'), [])
 
     def test_select_extend(self):
         query = User.select(User.c.id, User.c.username)
@@ -60,6 +51,67 @@ class TestSelectQuery(BaseTestCase):
             'SELECT "t1"."id", "t1"."name", "t1"."dob" '
             'FROM "person" AS "t1" '
             'WHERE ("t1"."dob" < ?)'), [datetime.date(1980, 1, 1)])
+
+    def test_select_in_list_of_values(self):
+        names_vals = [
+            ['charlie', 'huey'],
+            ('charlie', 'huey'),
+            set(('charlie', 'huey')),
+            frozenset(('charlie', 'huey'))]
+
+        for names in names_vals:
+            query = (Person
+                     .select()
+                     .where(Person.name.in_(names)))
+            sql, params = Context().sql(query).query()
+            self.assertEqual(sql, (
+                'SELECT "t1"."id", "t1"."name", "t1"."dob" '
+                'FROM "person" AS "t1" '
+                'WHERE ("t1"."name" IN (?, ?))'))
+            self.assertEqual(sorted(params), ['charlie', 'huey'])
+
+    def test_select_subselect_function(self):
+        # For functions whose only argument is a subquery, we do not need to
+        # include additional parentheses -- in fact, some databases will report
+        # a syntax error if we do.
+        exists = fn.EXISTS(Tweet
+                           .select(Tweet.c.id)
+                           .where(Tweet.c.user_id == User.c.id))
+        query = User.select(User.c.username, exists.alias('has_tweet'))
+        self.assertSQL(query, (
+            'SELECT "t1"."username", EXISTS('
+            'SELECT "t2"."id" FROM "tweets" AS "t2" '
+            'WHERE ("t2"."user_id" = "t1"."id")) AS "has_tweet" '
+            'FROM "users" AS "t1"'), [])
+
+        # If the function has more than one argument, we need to wrap the
+        # subquery in parentheses.
+        Stat = Table('stat', ['id', 'val'])
+        SA = Stat.alias('sa')
+        subq = SA.select(fn.SUM(SA.val).alias('val_sum'))
+        query = Stat.select(fn.COALESCE(subq, 0))
+        self.assertSQL(query, (
+            'SELECT COALESCE(('
+            'SELECT SUM("sa"."val") AS "val_sum" FROM "stat" AS "sa"'
+            '), ?) FROM "stat" AS "t1"'), [0])
+
+    def test_subquery_in_select_sql(self):
+        subq = User.select(User.c.id).where(User.c.username == 'huey')
+        query = Tweet.select(Tweet.c.content,
+                             Tweet.c.user_id.in_(subq).alias('is_huey'))
+        self.assertSQL(query, (
+            'SELECT "t1"."content", ("t1"."user_id" IN ('
+            'SELECT "t2"."id" FROM "users" AS "t2" WHERE ("t2"."username" = ?)'
+            ')) AS "is_huey" FROM "tweets" AS "t1"'), ['huey'])
+
+        # If we explicitly specify an alias, it will be included.
+        subq = subq.alias('sq')
+        query = Tweet.select(Tweet.c.content,
+                             Tweet.c.user_id.in_(subq).alias('is_huey'))
+        self.assertSQL(query, (
+            'SELECT "t1"."content", ("t1"."user_id" IN ('
+            'SELECT "t2"."id" FROM "users" AS "t2" WHERE ("t2"."username" = ?)'
+            ') AS "sq") AS "is_huey" FROM "tweets" AS "t1"'), ['huey'])
 
     def test_from_clause(self):
         query = (Note
@@ -493,6 +545,19 @@ class TestInsertQuery(BaseTestCase):
             'INSERT INTO "person" ("name") VALUES (?), (?), (?)'),
             ['charlie', 'huey', 'zaizee'])
 
+    def test_insert_list_with_columns(self):
+        data = [(i,) for i in ('charlie', 'huey', 'zaizee')]
+        query = Person.insert(data, columns=[Person.name])
+        self.assertSQL(query, (
+            'INSERT INTO "person" ("name") VALUES (?), (?), (?)'),
+            ['charlie', 'huey', 'zaizee'])
+
+        # Use column name instead of column instance.
+        query = Person.insert(data, columns=['name'])
+        self.assertSQL(query, (
+            'INSERT INTO "person" ("name") VALUES (?), (?), (?)'),
+            ['charlie', 'huey', 'zaizee'])
+
     def test_insert_query(self):
         source = User.select(User.c.username).where(User.c.admin == False)
         query = Person.insert(source, columns=[Person.name])
@@ -528,7 +593,8 @@ class TestInsertQuery(BaseTestCase):
                  .returning(Person.id, Person.name, Person.dob))
         self.assertSQL(query, (
             'INSERT INTO "person" ("dob", "name") '
-            'VALUES (?, ?) RETURNING "id", "name", "dob"'),
+            'VALUES (?, ?) '
+            'RETURNING "person"."id", "person"."name", "person"."dob"'),
             [datetime.date(2000, 1, 2), 'zaizee'])
 
     def test_empty(self):
@@ -537,7 +603,7 @@ class TestInsertQuery(BaseTestCase):
         if isinstance(db, MySQLDatabase):
             sql = 'INSERT INTO "empty" () VALUES ()'
         elif isinstance(db, PostgresqlDatabase):
-            sql = 'INSERT INTO "empty" DEFAULT VALUES RETURNING "id"'
+            sql = 'INSERT INTO "empty" DEFAULT VALUES RETURNING "empty"."id"'
         else:
             sql = 'INSERT INTO "empty" DEFAULT VALUES'
         self.assertSQL(query, sql, [])
@@ -554,9 +620,9 @@ class TestUpdateQuery(BaseTestCase):
         self.assertSQL(query, (
             'UPDATE "users" SET '
             '"admin" = ?, '
-            '"counter" = ("counter" + ?), '
+            '"counter" = ("users"."counter" + ?), '
             '"username" = ? '
-            'WHERE ("username" = ?)'), [False, 1, 'nuggie', 'nugz'])
+            'WHERE ("users"."username" = ?)'), [False, 1, 'nuggie', 'nugz'])
 
     def test_update_subquery(self):
         count = fn.COUNT(Tweet.c.id).alias('ct')
@@ -574,7 +640,7 @@ class TestUpdateQuery(BaseTestCase):
             'UPDATE "users" SET '
             '"counter" = ?, '
             '"muted" = ? '
-            'WHERE ("id" IN ('
+            'WHERE ("users"."id" IN ('
             'SELECT "users"."id", COUNT("t1"."id") AS "ct" '
             'FROM "users" AS "users" '
             'INNER JOIN "tweets" AS "t1" '
@@ -582,13 +648,26 @@ class TestUpdateQuery(BaseTestCase):
             'GROUP BY "users"."id" '
             'HAVING ("ct" > ?)))'), [0, True, 100])
 
+    def test_update_value_subquery(self):
+        subquery = (Tweet
+                    .select(fn.MAX(Tweet.c.id))
+                    .where(Tweet.c.user_id == User.c.id))
+        query = (User
+                 .update({User.c.last_tweet_id: subquery})
+                 .where(User.c.last_tweet_id.is_null(True)))
+        self.assertSQL(query, (
+            'UPDATE "users" SET '
+            '"last_tweet_id" = (SELECT MAX("t1"."id") FROM "tweets" AS "t1" '
+            'WHERE ("t1"."user_id" = "users"."id")) '
+            'WHERE ("users"."last_tweet_id" IS ?)'), [None])
+
     def test_update_from(self):
         data = [(1, 'u1-x'), (2, 'u2-x')]
         vl = ValuesList(data, columns=('id', 'username'), alias='tmp')
         query = (User
-                 .update(username=QualifiedNames(vl.c.username))
+                 .update(username=vl.c.username)
                  .from_(vl)
-                 .where(QualifiedNames(User.c.id == vl.c.id)))
+                 .where(User.c.id == vl.c.id))
         self.assertSQL(query, (
             'UPDATE "users" SET "username" = "tmp"."username" '
             'FROM (VALUES (?, ?), (?, ?)) AS "tmp"("id", "username") '
@@ -596,9 +675,9 @@ class TestUpdateQuery(BaseTestCase):
 
         subq = vl.select(vl.c.id, vl.c.username)
         query = (User
-                 .update({User.c.username: QualifiedNames(subq.c.username)})
+                 .update({User.c.username: subq.c.username})
                  .from_(subq)
-                 .where(QualifiedNames(User.c.id == subq.c.id)))
+                 .where(User.c.id == subq.c.id))
         self.assertSQL(query, (
             'UPDATE "users" SET "username" = "t1"."username" FROM ('
             'SELECT "tmp"."id", "tmp"."username" '
@@ -611,8 +690,8 @@ class TestUpdateQuery(BaseTestCase):
                  .where(User.c.username == 'charlie')
                  .returning(User.c.id))
         self.assertSQL(query, (
-            'UPDATE "users" SET "is_admin" = ? WHERE ("username" = ?) '
-            'RETURNING "id"'), [True, 'charlie'])
+            'UPDATE "users" SET "is_admin" = ? WHERE ("users"."username" = ?) '
+            'RETURNING "users"."id"'), [True, 'charlie'])
 
 
 class TestDeleteQuery(BaseTestCase):
@@ -621,9 +700,8 @@ class TestDeleteQuery(BaseTestCase):
                  .delete()
                  .where(User.c.username != 'charlie')
                  .limit(3))
-        self.assertSQL(
-            query,
-            'DELETE FROM "users" WHERE ("username" != ?) LIMIT ?',
+        self.assertSQL(query, (
+            'DELETE FROM "users" WHERE ("users"."username" != ?) LIMIT ?'),
             ['charlie', 3])
 
     def test_delete_subquery(self):
@@ -638,7 +716,7 @@ class TestDeleteQuery(BaseTestCase):
                  .where(User.c.id << subquery))
         self.assertSQL(query, (
             'DELETE FROM "users" '
-            'WHERE ("id" IN ('
+            'WHERE ("users"."id" IN ('
             'SELECT "users"."id", COUNT("t1"."id") AS "ct" '
             'FROM "users" AS "users" '
             'INNER JOIN "tweets" AS "t1" ON ("t1"."user_id" = "users"."id") '
@@ -658,7 +736,7 @@ class TestDeleteQuery(BaseTestCase):
             'WITH "u" AS '
             '(SELECT "t1"."id" FROM "users" AS "t1" WHERE ("t1"."admin" = ?)) '
             'DELETE FROM "users" '
-            'WHERE ("id" IN (SELECT "u"."id" FROM "u"))'), [True])
+            'WHERE ("users"."id" IN (SELECT "u"."id" FROM "u"))'), [True])
 
     def test_delete_returning(self):
         query = (User
@@ -667,20 +745,62 @@ class TestDeleteQuery(BaseTestCase):
                  .returning(User.c.username))
         self.assertSQL(query, (
             'DELETE FROM "users" '
-            'WHERE ("id" > ?) '
-            'RETURNING "username"'), [2])
+            'WHERE ("users"."id" > ?) '
+            'RETURNING "users"."username"'), [2])
 
         query = query.returning(User.c.id, User.c.username, SQL('1'))
         self.assertSQL(query, (
             'DELETE FROM "users" '
-            'WHERE ("id" > ?) '
-            'RETURNING "id", "username", 1'), [2])
+            'WHERE ("users"."id" > ?) '
+            'RETURNING "users"."id", "users"."username", 1'), [2])
 
 
 Register = Table('register', ('id', 'value', 'category'))
 
 
 class TestWindowFunctions(BaseTestCase):
+    def test_partition_unordered(self):
+        partition = [Register.category]
+        query = (Register
+                 .select(
+                     Register.category,
+                     Register.value,
+                     fn.AVG(Register.value).over(partition_by=partition))
+                 .order_by(Register.id))
+        self.assertSQL(query, (
+            'SELECT "t1"."category", "t1"."value", AVG("t1"."value") '
+            'OVER (PARTITION BY "t1"."category") '
+            'FROM "register" AS "t1" ORDER BY "t1"."id"'), [])
+
+    def test_ordered_unpartitioned(self):
+        query = (Register
+                 .select(
+                     Register.value,
+                     fn.RANK().over(order_by=[Register.value])))
+        self.assertSQL(query, (
+            'SELECT "t1"."value", RANK() OVER (ORDER BY "t1"."value") '
+            'FROM "register" AS "t1"'), [])
+
+    def test_ordered_partitioned(self):
+        query = Register.select(
+            Register.value,
+            fn.SUM(Register.value).over(
+                order_by=Register.id,
+                partition_by=Register.category).alias('rsum'))
+        self.assertSQL(query, (
+            'SELECT "t1"."value", SUM("t1"."value") '
+            'OVER (PARTITION BY "t1"."category" ORDER BY "t1"."id") AS "rsum" '
+            'FROM "register" AS "t1"'), [])
+
+    def test_empty_over(self):
+        query = (Register
+                 .select(Register.value, fn.LAG(Register.value, 1).over())
+                 .order_by(Register.value))
+        self.assertSQL(query, (
+            'SELECT "t1"."value", LAG("t1"."value", ?) OVER () '
+            'FROM "register" AS "t1" '
+            'ORDER BY "t1"."value"'), [1])
+
     def test_frame(self):
         query = (Register
                  .select(
@@ -699,7 +819,7 @@ class TestWindowFunctions(BaseTestCase):
                  .select(Register.value, fn.AVG(Register.value).over(
                      partition_by=[Register.category],
                      order_by=[Register.value],
-                     start=SQL('CURRENT ROW'),
+                     start=Window.CURRENT_ROW,
                      end=Window.following())))
         self.assertSQL(query, (
             'SELECT "t1"."value", AVG("t1"."value") '
@@ -707,6 +827,75 @@ class TestWindowFunctions(BaseTestCase):
             'ORDER BY "t1"."value" '
             'ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) '
             'FROM "register" AS "t1"'), [])
+
+    def test_frame_types(self):
+        def assertFrame(over_kwargs, expected):
+            query = Register.select(
+                Register.value,
+                fn.SUM(Register.value).over(**over_kwargs))
+            sql, params = __sql__(query)
+            match_obj = re.search('OVER \((.*?)\) FROM', sql)
+            self.assertTrue(match_obj is not None)
+            self.assertEqual(match_obj.groups()[0], expected)
+            self.assertEqual(params, [])
+
+        # No parameters -- empty OVER().
+        assertFrame({}, (''))
+        # Explicitly specify RANGE / ROWS frame-types.
+        assertFrame({'frame_type': Window.RANGE}, 'RANGE UNBOUNDED PRECEDING')
+        assertFrame({'frame_type': Window.ROWS}, 'ROWS UNBOUNDED PRECEDING')
+
+        # Start and end boundaries.
+        assertFrame({'start': Window.preceding(), 'end': Window.following()},
+                    'ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING')
+        assertFrame({
+            'start': Window.preceding(),
+            'end': Window.following(),
+            'frame_type': Window.RANGE,
+        }, 'RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING')
+        assertFrame({
+            'start': Window.preceding(),
+            'end': Window.following(),
+            'frame_type': Window.ROWS,
+        }, 'ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING')
+
+        # Start boundary.
+        assertFrame({'start': Window.preceding()}, 'ROWS UNBOUNDED PRECEDING')
+        assertFrame({'start': Window.preceding(), 'frame_type': Window.RANGE},
+                    'RANGE UNBOUNDED PRECEDING')
+        assertFrame({'start': Window.preceding(), 'frame_type': Window.ROWS},
+                    'ROWS UNBOUNDED PRECEDING')
+
+        # Ordered or partitioned.
+        assertFrame({'order_by': Register.value}, 'ORDER BY "t1"."value"')
+        assertFrame({'frame_type': Window.RANGE, 'order_by': Register.value},
+                    'ORDER BY "t1"."value" RANGE UNBOUNDED PRECEDING')
+        assertFrame({'frame_type': Window.ROWS, 'order_by': Register.value},
+                    'ORDER BY "t1"."value" ROWS UNBOUNDED PRECEDING')
+        assertFrame({'partition_by': Register.category},
+                    'PARTITION BY "t1"."category"')
+        assertFrame({
+            'frame_type': Window.RANGE,
+            'partition_by': Register.category,
+        }, 'PARTITION BY "t1"."category" RANGE UNBOUNDED PRECEDING')
+        assertFrame({
+            'frame_type': Window.ROWS,
+            'partition_by': Register.category,
+        }, 'PARTITION BY "t1"."category" ROWS UNBOUNDED PRECEDING')
+
+        # Ordering and boundaries.
+        assertFrame({'order_by': Register.value, 'start': Window.CURRENT_ROW,
+                     'end': Window.following()},
+                    ('ORDER BY "t1"."value" '
+                     'ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING'))
+        assertFrame({'order_by': Register.value, 'start': Window.CURRENT_ROW,
+                     'end': Window.following(), 'frame_type': Window.RANGE},
+                    ('ORDER BY "t1"."value" '
+                     'RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING'))
+        assertFrame({'order_by': Register.value, 'start': Window.CURRENT_ROW,
+                     'end': Window.following(), 'frame_type': Window.ROWS},
+                    ('ORDER BY "t1"."value" '
+                     'ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING'))
 
     def test_running_total(self):
         EventLog = Table('evtlog', ('id', 'timestamp', 'data'))
@@ -732,19 +921,6 @@ class TestWindowFunctions(BaseTestCase):
             'SUM("t1"."timestamp") OVER '
             '(PARTITION BY "t1"."data" ORDER BY "t1"."timestamp") AS "elapsed"'
             ' FROM "evtlog" AS "t1" ORDER BY "t1"."timestamp"'), [])
-
-    def test_partition_unordered(self):
-        partition = [Register.category]
-        query = (Register
-                 .select(
-                     Register.category,
-                     Register.value,
-                     fn.AVG(Register.value).over(partition_by=partition))
-                 .order_by(Register.id))
-        self.assertSQL(query, (
-            'SELECT "t1"."category", "t1"."value", AVG("t1"."value") '
-            'OVER (PARTITION BY "t1"."category") '
-            'FROM "register" AS "t1" ORDER BY "t1"."id"'), [])
 
     def test_named_window(self):
         window = Window(partition_by=[Register.category])
@@ -791,6 +967,18 @@ class TestWindowFunctions(BaseTestCase):
             'WINDOW w1 AS (PARTITION BY "t1"."category"), '
             'w2 AS (ORDER BY "t1"."value")'), [])
 
+    def test_alias_window(self):
+        w = Window(order_by=Register.value).alias('wx')
+        query = Register.select(Register.value, fn.RANK().over(w)).window(w)
+
+        # We can re-alias the window and it's updated alias is reflected
+        # correctly in the final query.
+        w.alias('wz')
+        self.assertSQL(query, (
+            'SELECT "t1"."value", RANK() OVER wz '
+            'FROM "register" AS "t1" '
+            'WINDOW wz AS (ORDER BY "t1"."value")'), [])
+
     def test_reuse_window(self):
         EventLog = Table('evt', ('id', 'timestamp', 'key'))
         window = Window(partition_by=[EventLog.key],
@@ -812,23 +1000,19 @@ class TestWindowFunctions(BaseTestCase):
             'PARTITION BY "t1"."key" ORDER BY "t1"."timestamp") '
             'ORDER BY "t1"."timestamp"'), [4, 5, 100])
 
-    def test_ordered_unpartitioned(self):
+    def test_filter_clause(self):
+        condsum = fn.SUM(Register.value).filter(Register.value > 1).over(
+            order_by=[Register.id], partition_by=[Register.category],
+            start=Window.preceding(1))
         query = (Register
-                 .select(
-                     Register.value,
-                     fn.RANK().over(order_by=[Register.value])))
+                 .select(Register.category, Register.value, condsum)
+                 .order_by(Register.category))
         self.assertSQL(query, (
-            'SELECT "t1"."value", RANK() OVER (ORDER BY "t1"."value") '
-            'FROM "register" AS "t1"'), [])
-
-    def test_empty_over(self):
-        query = (Register
-                 .select(Register.value, fn.LAG(Register.value, 1).over())
-                 .order_by(Register.value))
-        self.assertSQL(query, (
-            'SELECT "t1"."value", LAG("t1"."value", ?) OVER () '
+            'SELECT "t1"."category", "t1"."value", SUM("t1"."value") FILTER ('
+            'WHERE ("t1"."value" > ?)) OVER (PARTITION BY "t1"."category" '
+            'ORDER BY "t1"."id" ROWS 1 PRECEDING) '
             'FROM "register" AS "t1" '
-            'ORDER BY "t1"."value"'), [1])
+            'ORDER BY "t1"."category"'), [1])
 
 
 class TestValuesList(BaseTestCase):
@@ -948,6 +1132,15 @@ class TestSelectFeatures(BaseTestCase):
         query = Person.select(fn.COUNT(Person.name.distinct()))
         self.assertSQL(query, (
             'SELECT COUNT(DISTINCT "t1"."name") FROM "person" AS "t1"'), [])
+
+    def test_filtered_count(self):
+        filtered_count = (fn.COUNT(Person.name)
+                          .filter(Person.dob < datetime.date(2000, 1, 1)))
+        query = Person.select(fn.COUNT(Person.name), filtered_count)
+        self.assertSQL(query, (
+            'SELECT COUNT("t1"."name"), COUNT("t1"."name") '
+            'FILTER (WHERE ("t1"."dob" < ?)) '
+            'FROM "person" AS "t1"'), [datetime.date(2000, 1, 1)])
 
     def test_for_update(self):
         query = (Person
@@ -1071,6 +1264,30 @@ class TestOnConflictPostgresql(BaseTestCase):
         query = Person.insert(name='huey').on_conflict(conflict_target='name')
         with self.assertRaisesCtx(ValueError):
             self.database.get_sql_context().parse(query)
+
+    def test_conflict_target_or_constraint(self):
+        KV = Table('kv', ('key', 'value', 'extra'), _database=self.database)
+
+        query = (KV.insert(key='k1', value='v1', extra='e1')
+                 .on_conflict(conflict_target=[KV.key, KV.value],
+                              preserve=[KV.extra]))
+        self.assertSQL(query, (
+            'INSERT INTO "kv" ("extra", "key", "value") VALUES (?, ?, ?) '
+            'ON CONFLICT ("key", "value") DO UPDATE '
+            'SET "extra" = EXCLUDED."extra"'), ['e1', 'k1', 'v1'])
+
+        query = (KV.insert(key='k1', value='v1', extra='e1')
+                 .on_conflict(conflict_constraint='kv_key_value',
+                              preserve=[KV.extra]))
+        self.assertSQL(query, (
+            'INSERT INTO "kv" ("extra", "key", "value") VALUES (?, ?, ?) '
+            'ON CONFLICT ON CONSTRAINT "kv_key_value" DO UPDATE '
+            'SET "extra" = EXCLUDED."extra"'), ['e1', 'k1', 'v1'])
+
+        query = KV.insert(key='k1', value='v1', extra='e1')
+        self.assertRaises(ValueError, query.on_conflict,
+                          conflict_target=[KV.key, KV.value],
+                          conflict_constraint='kv_key_value')
 
     def test_update(self):
         dob = datetime.date(2010, 1, 1)

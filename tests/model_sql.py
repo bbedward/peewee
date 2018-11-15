@@ -14,7 +14,7 @@ from .base_models import *
 
 class TestModelSQL(ModelDatabaseTestCase):
     database = get_in_memory_db()
-    requires = [Category, Note, Person, Relationship]
+    requires = [Category, Note, Person, Relationship, User]
 
     def test_select(self):
         query = (Person
@@ -77,6 +77,35 @@ class TestModelSQL(ModelDatabaseTestCase):
             'FROM "users" AS "t1" '
             'LEFT OUTER JOIN "tweet" AS "t2" ON ("t2"."user_id" = "t1"."id") '
             'GROUP BY "t1"."id", "t1"."username"'), [])
+
+    def test_group_by_extend(self):
+        query = (User
+                 .select(User, fn.COUNT(Tweet.id).alias('tweet_count'))
+                 .join(Tweet, JOIN.LEFT_OUTER)
+                 .group_by_extend(User.id).group_by_extend(User.username))
+        self.assertSQL(query, (
+            'SELECT "t1"."id", "t1"."username", '
+            'COUNT("t2"."id") AS "tweet_count" '
+            'FROM "users" AS "t1" '
+            'LEFT OUTER JOIN "tweet" AS "t2" ON ("t2"."user_id" = "t1"."id") '
+            'GROUP BY "t1"."id", "t1"."username"'), [])
+
+    def test_order_by(self):
+        query = (User
+                 .select()
+                 .order_by(User.username.desc(), User.id))
+        self.assertSQL(query, (
+            'SELECT "t1"."id", "t1"."username" FROM "users" AS "t1" '
+            'ORDER BY "t1"."username" DESC, "t1"."id"'), [])
+
+    def test_order_by_extend(self):
+        query = (User
+                 .select()
+                 .order_by_extend(User.username.desc())
+                 .order_by_extend(User.id))
+        self.assertSQL(query, (
+            'SELECT "t1"."id", "t1"."username" FROM "users" AS "t1" '
+            'ORDER BY "t1"."username" DESC, "t1"."id"'), [])
 
     def test_subquery_correction(self):
         users = User.select().where(User.username.in_(['foo', 'bar']))
@@ -222,6 +251,21 @@ class TestModelSQL(ModelDatabaseTestCase):
             'SELECT "t1"."name", "t1"."parent_id" FROM "category" AS "t1" '
             'WHERE ("t1"."parent_id" = ?)'), ['test'])
 
+    def test_cross_join(self):
+        class A(TestModel):
+            id = IntegerField(primary_key=True)
+        class B(TestModel):
+            id = IntegerField(primary_key=True)
+        query = (A
+                 .select(A.id.alias('aid'), B.id.alias('bid'))
+                 .join(B, JOIN.CROSS)
+                 .order_by(A.id, B.id))
+        self.assertSQL(query, (
+            'SELECT "t1"."id" AS "aid", "t2"."id" AS "bid" '
+            'FROM "a" AS "t1" '
+            'CROSS JOIN "b" AS "t2" '
+            'ORDER BY "t1"."id", "t2"."id"'), [])
+
     def test_raw(self):
         query = (Person
                  .raw('SELECT first, last, dob FROM person '
@@ -281,6 +325,19 @@ class TestModelSQL(ModelDatabaseTestCase):
             'VALUES (?, ?), (?, ?)'),
             [1, 'note-1', 2, 'note-2'])
 
+    def test_insert_many_list_with_fields(self):
+        data = [(i,) for i in ('charlie', 'huey', 'zaizee')]
+        query = User.insert_many(data, fields=[User.username])
+        self.assertSQL(query, (
+            'INSERT INTO "users" ("username") VALUES (?), (?), (?)'),
+            ['charlie', 'huey', 'zaizee'])
+
+        # Use field name instead of field obj.
+        query = User.insert_many(data, fields=['username'])
+        self.assertSQL(query, (
+            'INSERT INTO "users" ("username") VALUES (?), (?), (?)'),
+            ['charlie', 'huey', 'zaizee'])
+
     def test_insert_query(self):
         select = (Person
                   .select(Person.id, Person.first)
@@ -309,7 +366,7 @@ class TestModelSQL(ModelDatabaseTestCase):
         query = User.insert({User.username: 'zaizee'})
         self.assertSQL(query, (
             'INSERT INTO "user" ("username") '
-            'VALUES (?) RETURNING "id"'), ['zaizee'])
+            'VALUES (?) RETURNING "user"."id"'), ['zaizee'])
 
         class Person(Model):
             name = CharField()
@@ -320,7 +377,7 @@ class TestModelSQL(ModelDatabaseTestCase):
         query = Person.insert({Person.name: 'charlie', Person.ssn: '123'})
         self.assertSQL(query, (
             'INSERT INTO "person" ("ssn", "name") VALUES (?, ?) '
-            'RETURNING "ssn"'), ['123', 'charlie'])
+            'RETURNING "person"."ssn"'), ['123', 'charlie'])
 
         query = Person.insert({Person.name: 'huey'}).returning()
         self.assertSQL(query, (
@@ -337,16 +394,17 @@ class TestModelSQL(ModelDatabaseTestCase):
                           Stat.timestamp: datetime.datetime(2017, 1, 1)})
                  .where(Stat.url == '/peewee'))
         self.assertSQL(query, (
-            'UPDATE "stat" SET "count" = ("count" + ?), "timestamp" = ? '
-            'WHERE ("url" = ?)'),
+            'UPDATE "stat" SET "count" = ("stat"."count" + ?), '
+            '"timestamp" = ? '
+            'WHERE ("stat"."url" = ?)'),
             [1, 1483228800, '/peewee'])
 
         query = (Stat
                  .update(count=Stat.count + 1)
                  .where(Stat.url == '/peewee'))
         self.assertSQL(query, (
-            'UPDATE "stat" SET "count" = ("count" + ?) '
-            'WHERE ("url" = ?)'),
+            'UPDATE "stat" SET "count" = ("stat"."count" + ?) '
+            'WHERE ("stat"."url" = ?)'),
             [1, '/peewee'])
 
     def test_update_from(self):
@@ -366,26 +424,26 @@ class TestModelSQL(ModelDatabaseTestCase):
                  .where(Account.sales == SalesPerson.id))
         self.assertSQL(query, (
             'UPDATE "account" SET '
-            '"contact_first" = "first", '
-            '"contact_last" = "last" '
-            'FROM "salesperson" AS "t1" '
-            'WHERE ("sales_id" = "id")'), [])
+            '"contact_first" = "t1"."first", '
+            '"contact_last" = "t1"."last" '
+            'FROM "sales_person" AS "t1" '
+            'WHERE ("account"."sales_id" = "t1"."id")'), [])
 
         query = (User
-                 .update({User.username: QualifiedNames(Tweet.content)})
+                 .update({User.username: Tweet.content})
                  .from_(Tweet)
                  .where(Tweet.content == 'tx'))
         self.assertSQL(query, (
             'UPDATE "users" SET "username" = "t1"."content" '
-            'FROM "tweet" AS "t1" WHERE ("content" = ?)'), ['tx'])
+            'FROM "tweet" AS "t1" WHERE ("t1"."content" = ?)'), ['tx'])
 
     def test_update_from_qualnames(self):
         data = [(1, 'u1-x'), (2, 'u2-x')]
         vl = ValuesList(data, columns=('id', 'username'), alias='tmp')
         query = (User
-                 .update({User.username: QualifiedNames(vl.c.username)})
+                 .update({User.username: vl.c.username})
                  .from_(vl)
-                 .where(QualifiedNames(User.id == vl.c.id)))
+                 .where(User.id == vl.c.id))
         self.assertSQL(query, (
             'UPDATE "users" SET "username" = "tmp"."username" '
             'FROM (VALUES (?, ?), (?, ?)) AS "tmp"("id", "username") '
@@ -396,9 +454,9 @@ class TestModelSQL(ModelDatabaseTestCase):
         vl = ValuesList(data, columns=('id', 'username'), alias='tmp')
         subq = vl.select(vl.c.id, vl.c.username)
         query = (User
-                 .update({User.username: QualifiedNames(subq.c.username)})
+                 .update({User.username: subq.c.username})
                  .from_(subq)
-                 .where(QualifiedNames(User.id == subq.c.id)))
+                 .where(User.id == subq.c.id))
         self.assertSQL(query, (
             'UPDATE "users" SET "username" = "t1"."username" FROM ('
             'SELECT "tmp"."id", "tmp"."username" '
@@ -411,13 +469,13 @@ class TestModelSQL(ModelDatabaseTestCase):
                  .where(Note.author << (Person.select(Person.id)
                                         .where(Person.last == 'cat'))))
         self.assertSQL(query, ('DELETE FROM "note" '
-                               'WHERE ("author_id" IN ('
+                               'WHERE ("note"."author_id" IN ('
                                'SELECT "t1"."id" FROM "person" AS "t1" '
                                'WHERE ("t1"."last" = ?)))'), ['cat'])
 
         query = Note.delete().where(Note.author == Person(id=123))
-        self.assertSQL(query, 'DELETE FROM "note" WHERE ("author_id" = ?)',
-                       [123])
+        self.assertSQL(query, (
+            'DELETE FROM "note" WHERE ("note"."author_id" = ?)'), [123])
 
     def test_delete_recursive(self):
         class User(TestModel):
@@ -440,13 +498,15 @@ class TestModelSQL(ModelDatabaseTestCase):
 
         self.assertEqual(sorted(accum), [
             ('DELETE FROM "like" WHERE ('
-             '"tweet_id" IN ('
+             '"like"."tweet_id" IN ('
              'SELECT "t1"."id" FROM "tweet" AS "t1" WHERE ('
              '"t1"."user_id" = ?)))', [1]),
-            ('DELETE FROM "like" WHERE ("user_id" = ?)', [1]),
-            ('DELETE FROM "relationship" WHERE ("from_user_id" = ?)', [1]),
-            ('DELETE FROM "relationship" WHERE ("to_user_id" = ?)', [1]),
-            ('DELETE FROM "tweet" WHERE ("user_id" = ?)', [1]),
+            ('DELETE FROM "like" WHERE ("like"."user_id" = ?)', [1]),
+            ('DELETE FROM "relationship" '
+             'WHERE ("relationship"."from_user_id" = ?)', [1]),
+            ('DELETE FROM "relationship" '
+             'WHERE ("relationship"."to_user_id" = ?)', [1]),
+            ('DELETE FROM "tweet" WHERE ("tweet"."user_id" = ?)', [1]),
         ])
 
     def test_aliases(self):
@@ -489,7 +549,7 @@ class TestModelSQL(ModelDatabaseTestCase):
         query = WithSchema.select().where(WithSchema.data == 'zaizee')
         self.assertSQL(query, (
             'SELECT "t1"."data" '
-            'FROM "huey"."withschema" AS "t1" '
+            'FROM "huey"."with_schema" AS "t1" '
             'WHERE ("t1"."data" = ?)'), ['zaizee'])
 
 
@@ -520,7 +580,7 @@ class TestStringsForFieldsa(ModelDatabaseTestCase):
         qliteral = Person.update({'last': 'kitty'}).where(Person.last == 'cat')
         for query in (qkwargs, qliteral):
             self.assertSQL(query, (
-                'UPDATE "person" SET "last" = ? WHERE ("last" = ?)'),
+                'UPDATE "person" SET "last" = ? WHERE ("person"."last" = ?)'),
                 ['kitty', 'cat'])
 
 

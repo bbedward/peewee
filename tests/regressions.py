@@ -1,11 +1,16 @@
 from peewee import *
 
 from .base import BaseTestCase
+from .base import IS_MYSQL
 from .base import ModelTestCase
 from .base import TestModel
 from .base import get_in_memory_db
 from .base import requires_models
 from .base import requires_mysql
+from .base import requires_postgresql
+from .base import skip_if
+from .base_models import Sample
+from .base_models import Tweet
 from .base_models import User
 
 
@@ -119,16 +124,16 @@ class TestDeleteInstanceRegression(ModelTestCase):
 
         queries = [logrecord.msg for logrecord in self._qh.queries[-5:]]
         self.assertEqual(sorted(queries, reverse=True), [
-            ('DELETE FROM "did" WHERE ("c_id" IN ('
-             'SELECT "t1"."id" FROM "dic" AS "t1" WHERE ("t1"."b_id" IN ('
-             'SELECT "t2"."id" FROM "dib" AS "t2" WHERE ("t2"."a_id" = ?)'
+            ('DELETE FROM "di_d" WHERE ("di_d"."c_id" IN ('
+             'SELECT "t1"."id" FROM "di_c" AS "t1" WHERE ("t1"."b_id" IN ('
+             'SELECT "t2"."id" FROM "di_b" AS "t2" WHERE ("t2"."a_id" = ?)'
              '))))', [2]),
-            ('DELETE FROM "dic" WHERE ("b_id" IN ('
-             'SELECT "t1"."id" FROM "dib" AS "t1" WHERE ("t1"."a_id" = ?)'
+            ('DELETE FROM "di_c" WHERE ("di_c"."b_id" IN ('
+             'SELECT "t1"."id" FROM "di_b" AS "t1" WHERE ("t1"."a_id" = ?)'
              '))', [2]),
-            ('DELETE FROM "diba" WHERE ("a_id" = ?)', ['a2']),
-            ('DELETE FROM "dib" WHERE ("a_id" = ?)', [2]),
-            ('DELETE FROM "dia" WHERE ("id" = ?)', [2])
+            ('DELETE FROM "di_ba" WHERE ("di_ba"."a_id" = ?)', ['a2']),
+            ('DELETE FROM "di_b" WHERE ("di_b"."a_id" = ?)', [2]),
+            ('DELETE FROM "di_a" WHERE ("di_a"."id" = ?)', [2])
         ])
 
         # a1 & a3 exist, plus their relations.
@@ -219,3 +224,209 @@ class TestInsertFromSQL(ModelTestCase):
         query_src = SQL('SELECT name FROM user_src')
         User.insert_from(query=query_src, fields=[User.username]).execute()
         self.assertEqual([u.username for u in User.select()], ['foo'])
+
+
+class TestSubqueryFunctionCall(BaseTestCase):
+    def test_subquery_function_call(self):
+        Sample = Table('sample')
+        SA = Sample.alias('s2')
+        query = (Sample
+                 .select(Sample.c.data)
+                 .where(~fn.EXISTS(
+                     SA.select(SQL('1')).where(SA.c.key == 'foo'))))
+        self.assertSQL(query, (
+            'SELECT "t1"."data" FROM "sample" AS "t1" '
+            'WHERE NOT EXISTS('
+            'SELECT 1 FROM "sample" AS "s2" WHERE ("s2"."key" = ?))'), ['foo'])
+
+
+class A(TestModel):
+    id = IntegerField(primary_key=True)
+class B(TestModel):
+    id = IntegerField(primary_key=True)
+class C(TestModel):
+    id = IntegerField(primary_key=True)
+    a = ForeignKeyField(A)
+    b = ForeignKeyField(B)
+
+class TestCrossJoin(ModelTestCase):
+    requires = [A, B, C]
+
+    def setUp(self):
+        super(TestCrossJoin, self).setUp()
+        A.insert_many([(1,), (2,), (3,)], fields=[A.id]).execute()
+        B.insert_many([(1,), (2,)], fields=[B.id]).execute()
+        C.insert_many([
+            (1, 1, 1),
+            (2, 1, 2),
+            (3, 2, 1)], fields=[C.id, C.a, C.b]).execute()
+
+    def test_cross_join(self):
+        query = (A
+                 .select(A.id.alias('aid'), B.id.alias('bid'))
+                 .join(B, JOIN.CROSS)
+                 .join(C, JOIN.LEFT_OUTER, on=(
+                     (C.a == A.id) &
+                     (C.b == B.id)))
+                 .where(C.id.is_null())
+                 .order_by(A.id, B.id))
+        self.assertEqual(list(query.tuples()), [(2, 2), (3, 1), (3, 2)])
+
+
+def _create_users_tweets(db):
+    data = (
+        ('huey', ('meow', 'hiss', 'purr')),
+        ('mickey', ('woof', 'bark')),
+        ('zaizee', ()))
+    with db.atomic():
+        for username, tweets in data:
+            user = User.create(username=username)
+            for tweet in tweets:
+                Tweet.create(user=user, content=tweet)
+
+
+class TestSubqueryInSelect(ModelTestCase):
+    requires = [User, Tweet]
+
+    def setUp(self):
+        super(TestSubqueryInSelect, self).setUp()
+        _create_users_tweets(self.database)
+
+    def test_subquery_in_select(self):
+        subq = User.select().where(User.username == 'huey')
+        query = (Tweet
+                 .select(Tweet.content, Tweet.user.in_(subq).alias('is_huey'))
+                 .order_by(Tweet.content))
+        self.assertEqual([(r.content, r.is_huey) for r in query], [
+            ('bark', False),
+            ('hiss', True),
+            ('meow', True),
+            ('purr', True),
+            ('woof', False)])
+
+
+@requires_postgresql
+class TestReturningIntegrationRegressions(ModelTestCase):
+    requires = [User, Tweet]
+
+    def test_returning_integration_subqueries(self):
+        _create_users_tweets(self.database)
+
+        # We can use a correlated subquery in the RETURNING clause.
+        subq = (Tweet
+                .select(fn.COUNT(Tweet.id).alias('ct'))
+                .where(Tweet.user == User.id))
+        query = (User
+                 .update(username=(User.username + '-x'))
+                 .returning(subq, User.username))
+        result = query.execute()
+        self.assertEqual(sorted([(r.ct, r.username) for r in result]), [
+            (0, 'zaizee-x'), (2, 'mickey-x'), (3, 'huey-x')])
+
+        # We can use a correlated subquery via UPDATE...FROM, and reference the
+        # FROM table in both the update and the RETURNING clause.
+        subq = (User
+                .select(User.id, fn.COUNT(Tweet.id).alias('ct'))
+                .join(Tweet, JOIN.LEFT_OUTER)
+                .group_by(User.id))
+        query = (User
+                 .update(username=User.username + subq.c.ct)
+                 .from_(subq)
+                 .where(User.id == subq.c.id)
+                 .returning(subq.c.ct, User.username))
+        result = query.execute()
+        self.assertEqual(sorted([(r.ct, r.username) for r in result]), [
+            (0, 'zaizee-x0'), (2, 'mickey-x2'), (3, 'huey-x3')])
+
+    def test_returning_integration(self):
+        query = (User
+                 .insert_many([('huey',), ('mickey',), ('zaizee',)],
+                              fields=[User.username])
+                 .returning(User.id, User.username)
+                 .objects())
+        result = query.execute()
+        self.assertEqual([(r.id, r.username) for r in result], [
+            (1, 'huey'), (2, 'mickey'), (3, 'zaizee')])
+
+        query = (User
+                 .delete()
+                 .where(~User.username.startswith('h'))
+                 .returning(User.id, User.username)
+                 .objects())
+        result = query.execute()
+        self.assertEqual(sorted([(r.id, r.username) for r in result]), [
+            (2, 'mickey'), (3, 'zaizee')])
+
+
+class TestUpdateIntegrationRegressions(ModelTestCase):
+    requires = [User, Tweet, Sample]
+
+    def setUp(self):
+        super(TestUpdateIntegrationRegressions, self).setUp()
+        _create_users_tweets(self.database)
+        for i in range(4):
+            Sample.create(counter=i, value=i)
+
+    @skip_if(IS_MYSQL)
+    def test_update_examples(self):
+        # Do a simple update.
+        res = (User
+               .update(username=(User.username + '-cat'))
+               .where(User.username != 'mickey')
+               .execute())
+
+        users = User.select().order_by(User.username)
+        self.assertEqual([u.username for u in users.clone()],
+                         ['huey-cat', 'mickey', 'zaizee-cat'])
+
+        # Do an update using a subquery..
+        subq = User.select(User.username).where(User.username == 'mickey')
+        res = (User
+               .update(username=(User.username + '-dog'))
+               .where(User.username.in_(subq))
+               .execute())
+        self.assertEqual([u.username for u in users.clone()],
+                         ['huey-cat', 'mickey-dog', 'zaizee-cat'])
+
+        # Subquery referring to a different table.
+        subq = User.select().where(User.username == 'mickey-dog')
+        res = (Tweet
+               .update(content=(Tweet.content + '-x'))
+               .where(Tweet.user.in_(subq))
+               .execute())
+
+        self.assertEqual(
+            [t.content for t in Tweet.select().order_by(Tweet.id)],
+            ['meow', 'hiss', 'purr', 'woof-x', 'bark-x'])
+
+        # Subquery on the right-hand of the assignment.
+        subq = Tweet.select(fn.COUNT(Tweet.id)).where(Tweet.user == User.id)
+        res = User.update(username=(User.username + '-' + subq)).execute()
+
+        self.assertEqual([u.username for u in users.clone()],
+                         ['huey-cat-3', 'mickey-dog-2', 'zaizee-cat-0'])
+
+    def test_update_examples_2(self):
+        SA = Sample.alias()
+        subq = (SA
+                .select(SA.value)
+                .where(SA.value.in_([1.0, 3.0])))
+        res = (Sample
+               .update(counter=(Sample.counter + Sample.value))
+               .where(Sample.value.in_(subq))
+               .execute())
+
+        query = (Sample
+                 .select(Sample.counter, Sample.value)
+                 .order_by(Sample.id)
+                 .tuples())
+        self.assertEqual(list(query.clone()), [(0, 0.), (2, 1.), (2, 2.),
+                                               (6, 3.)])
+
+        subq = SA.select(SA.counter - SA.value).where(SA.value == Sample.value)
+        res = (Sample
+               .update(counter=subq)
+               .where(Sample.value.in_([1., 3.]))
+               .execute())
+        self.assertEqual(list(query.clone()), [(0, 0.), (1, 1.), (2, 2.),
+                                               (3, 3.)])

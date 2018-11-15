@@ -1010,10 +1010,10 @@ changes:
 
 .. code-block:: python
 
-    def blog_search(query):
+    def blog_search(search_term):
         return Blog.select().where(
             (Blog.status == Blog.STATUS_PUBLISHED) &
-            Match(Blog.content, query))
+            Match(Blog.content, search_term))
 
 The :py:func:`Match` function will automatically convert the left-hand operand
 to a ``tsvector``, and the right-hand operand to a ``tsquery``. For better
@@ -1514,10 +1514,10 @@ postgres_ext API notes
 
     .. code-block:: python
 
-        def blog_search(query):
+        def blog_search(search_term):
             return Blog.select().where(
                 (Blog.status == Blog.STATUS_PUBLISHED) &
-                Match(Blog.content, query))
+                Match(Blog.content, search_term))
 
 .. py:class:: TSVectorField
 
@@ -2647,23 +2647,35 @@ Command-line options
 
 pwiz accepts the following command-line options:
 
-======    ========================= ============================================
-Option    Meaning                   Example
-======    ========================= ============================================
+======    =================================== ============================================
+Option    Meaning                             Example
+======    =================================== ============================================
 -h        show help
--e        database backend          -e mysql
--H        host to connect to        -H remote.db.server
--p        port to connect on        -p 9001
--u        database user             -u postgres
--P        database password         -P secret
--s        postgres schema           -s public
-======    ========================= ============================================
+-e        database backend                    -e mysql
+-H        host to connect to                  -H remote.db.server
+-p        port to connect on                  -p 9001
+-u        database user                       -u postgres
+-P        database password                   -P (will be prompted for password)
+-s        schema                              -s public
+-t        tables to generate                  -t tweet,users,relationships
+-v        generate models for VIEWs           (no argument)
+-i        add info metadata to generated file (no argument)
+-o        table column order is preserved     (no argument)
+======    =================================== ============================================
 
-The following are valid parameters for the engine:
+The following are valid parameters for the ``engine`` (``-e``):
 
 * sqlite
 * mysql
 * postgresql
+
+.. warning::
+    If a password is required to access your database, you will be prompted to
+    enter it using a secure prompt.
+
+    **The password will be included in the output**. Specifically, at the top
+    of the file a :py:class:`Database` will be defined along with any required
+    parameters -- including the password.
 
 pwiz examples
 ^^^^^^^^^^^^^
@@ -2675,8 +2687,9 @@ Examples of introspecting various databases:
     # Introspect a Sqlite database.
     python -m pwiz -e sqlite path/to/sqlite_database.db
 
-    # Introspect a MySQL database, logging in as root:secret.
-    python -m pwiz -e mysql -u root -P secret mysql_db_name
+    # Introspect a MySQL database, logging in as root. You will be prompted
+    # for a password ("-P").
+    python -m pwiz -e mysql -u root -P mysql_db_name
 
     # Introspect a Postgresql database on a remote server.
     python -m pwiz -e postgres -u postgres -H 10.1.0.3 pg_db_name
@@ -2888,6 +2901,22 @@ Dropping an index:
     # Specify the index name.
     migrate(migrator.drop_index('story', 'story_pub_date_status'))
 
+Adding or dropping table constraints:
+
+.. code-block:: python
+
+    # Add a CHECK() constraint to enforce the price cannot be negative.
+    migrate(migrator.add_constraint(
+        'products',
+        'price_check',
+        Check('price >= 0')))
+
+    # Remove the price check constraint.
+    migrate(migrator.drop_constraint('products', 'price_check'))
+
+    # Add a UNIQUE constraint on the first and last names.
+    migrate(migrator.add_unique('person', 'first_name', 'last_name'))
+
 
 Migrations API
 ^^^^^^^^^^^^^^
@@ -2964,8 +2993,25 @@ Migrations API
 
     .. py:method:: drop_index(table, index_name)
 
-        :param str table Name of the table containing the index to be dropped.
+        :param str table: Name of the table containing the index to be dropped.
         :param str index_name: Name of the index to be dropped.
+
+    .. py:method:: add_constraint(table, name, constraint)
+
+        :param str table: Table to add constraint to.
+        :param str name: Name used to identify the constraint.
+        :param constraint: either a :py:func:`Check` constraint or for
+            adding an arbitrary constraint use :py:class:`SQL`.
+
+    .. py:method:: drop_constraint(table, name)
+
+        :param str table: Table to drop constraint from.
+        :param str name: Name of constraint to drop.
+
+    .. py:method:: add_unique(table, *column_names)
+
+        :param str table: Table to add constraint to.
+        :param str column_names: One or more columns for UNIQUE constraint.
 
 .. py:class:: PostgresqlMigrator(database)
 
@@ -2980,6 +3026,13 @@ Migrations API
 .. py:class:: SqliteMigrator(database)
 
     Generate migrations for SQLite databases.
+
+    SQLite has limited support for ``ALTER TABLE`` queries, so the following
+    operations are currently not supported for SQLite:
+
+    * ``add_constraint``
+    * ``drop_constraint``
+    * ``add_unique``
 
 .. py:class:: MySQLMigrator(database)
 
@@ -3023,7 +3076,7 @@ including :ref:`dataset` and :ref:`pwiz`.
             User = models['user']
             Tweet = models['tweet']
 
-    .. py:method:: generate_models([skip_invalid=False[, table_names=None[, literal_column_names=False[, bare_fields=False]]]])
+    .. py:method:: generate_models([skip_invalid=False[, table_names=None[, literal_column_names=False[, bare_fields=False[, include_views=False]]]]])
 
         :param bool skip_invalid: Skip tables whose names are invalid python
             identifiers.
@@ -3033,6 +3086,7 @@ including :ref:`dataset` and :ref:`pwiz`.
             column names are "python-ized", i.e. mixed-case becomes lower-case.
         :param bare_fields: **SQLite-only**. Do not specify data-types for
             introspected columns.
+        :param include_views: generate models for VIEWs as well.
         :return: A dictionary mapping table-names to model classes.
 
         Introspect the database, reading in the tables, columns, and foreign
@@ -3165,7 +3219,7 @@ Pool APIs
     :param str database: The name of the database or database file.
     :param int max_connections: Maximum number of connections. Provide ``None`` for unlimited.
     :param int stale_timeout: Number of seconds to allow connections to be used.
-    :param int timeout: Number of seconds block when pool is full. By default peewee does not block when the pool is full but simply throws an exception. To block indefinitely set this value to ``0``.
+    :param int timeout: Number of seconds to block when pool is full. By default peewee does not block when the pool is full but simply throws an exception. To block indefinitely set this value to ``0``.
     :param kwargs: Arbitrary keyword arguments passed to database class.
 
     Mixin class intended to be used with a subclass of :py:class:`Database`.
@@ -3174,17 +3228,28 @@ Pool APIs
 
     .. note:: If the number of open connections exceeds `max_connections`, a `ValueError` will be raised.
 
-    .. py:method:: _connect(*args, **kwargs)
-
-        Request a connection from the pool. If there are no available connections a new one will be opened.
-
-    .. py:method:: _close(conn[, close_conn=False])
-
-        By default `conn` will not be closed and instead will be returned to the pool of available connections. If `close_conn=True`, then `conn` will be closed and *not* be returned to the pool.
-
     .. py:method:: manual_close()
 
         Close the currently-open connection without returning it to the pool.
+
+    .. py:method:: close_idle()
+
+        Close all idle connections. This does not include any connections that
+        are currently in-use -- only those that were previously created but
+        have since been returned back to the pool.
+
+    .. py:method:: close_stale([age=600])
+
+        :param int age: Age at which a connection should be considered stale.
+        :returns: Number of connections closed.
+
+        Close connections which are in-use but exceed the given age. **Use
+        caution when calling this method!**
+
+    .. py:method:: close_all()
+
+        Close all connections. This includes any connections that may be in use
+        at the time. **Use caution when calling this method!**
 
 .. py:class:: PooledPostgresqlDatabase
 

@@ -7,6 +7,8 @@ from inspect import isclass
 import re
 
 from peewee import *
+from peewee import _StringField
+from peewee import text_type
 try:
     from pymysql.constants import FIELD_TYPE
 except ImportError:
@@ -194,6 +196,9 @@ class Metadata(object):
         if default is None or field_class in (AutoField, BigAutoField) or \
            default.lower() == 'null':
             return
+        if issubclass(field_class, _StringField) and \
+           isinstance(default, text_type) and not default.startswith("'"):
+            default = "'%s'" % default
         return default or "''"
 
     def get_foreign_keys(self, table, schema=None):
@@ -362,16 +367,19 @@ class SqliteMetadata(Metadata):
         'date': DateField,
         'datetime': DateTimeField,
         'decimal': DecimalField,
+        'float': FloatField,
         'integer': IntegerField,
         'integer unsigned': IntegerField,
         'int': IntegerField,
         'long': BigIntegerField,
+        'numeric': DecimalField,
         'real': FloatField,
         'smallinteger': IntegerField,
         'smallint': IntegerField,
         'smallint unsigned': IntegerField,
         'text': TextField,
         'time': TimeField,
+        'varchar': CharField,
     }
 
     begin = '(?:["\[\(]+)?'
@@ -447,8 +455,10 @@ class Introspector(object):
             metadata = PostgresqlMetadata(database)
         elif isinstance(database, MySQLDatabase):
             metadata = MySQLMetadata(database)
-        else:
+        elif isinstance(database, SqliteDatabase):
             metadata = SqliteMetadata(database)
+        else:
+            raise ValueError('Introspection not supported for %r' % database)
         return cls(metadata, schema=schema)
 
     def get_database_class(self):
@@ -481,15 +491,17 @@ class Introspector(object):
             column = '_' + column
         return column
 
-    def introspect(self, table_names=None, literal_column_names=False):
+    def introspect(self, table_names=None, literal_column_names=False,
+                   include_views=False):
         # Retrieve all the tables in the database.
-        if self.schema:
-            tables = self.metadata.database.get_tables(schema=self.schema)
-        else:
-            tables = self.metadata.database.get_tables()
+        tables = self.metadata.database.get_tables(schema=self.schema)
+        if include_views:
+            views = self.metadata.database.get_views(schema=self.schema)
+            tables.extend([view.name for view in views])
 
         if table_names is not None:
             tables = [table for table in tables if table in table_names]
+        table_set = set(tables)
 
         # Store a mapping of table name -> dictionary of columns.
         columns = {}
@@ -516,6 +528,14 @@ class Introspector(object):
             except ValueError as exc:
                 err(*exc.args)
                 foreign_keys[table] = []
+            else:
+                # If there is a possibility we could exclude a dependent table,
+                # ensure that we introspect it so FKs will work.
+                if table_names is not None:
+                    for foreign_key in foreign_keys[table]:
+                        if foreign_key.dest_table not in table_set:
+                            tables.append(foreign_key.dest_table)
+                            table_set.add(foreign_key.dest_table)
 
             model_names[table] = self.make_model_name(table)
 
@@ -593,9 +613,10 @@ class Introspector(object):
             indexes)
 
     def generate_models(self, skip_invalid=False, table_names=None,
-                        literal_column_names=False, bare_fields=False):
-        database = self.introspect(table_names=table_names,
-                                   literal_column_names=literal_column_names)
+                        literal_column_names=False, bare_fields=False,
+                        include_views=False):
+        database = self.introspect(table_names, literal_column_names,
+                                   include_views)
         models = {}
 
         class BaseModel(Model):

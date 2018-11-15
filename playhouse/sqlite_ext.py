@@ -570,10 +570,7 @@ class FTS5Model(BaseFTSModel):
 
     @classmethod
     def rank(cls, *args):
-        if args:
-            return cls.bm25(*args)
-        else:
-            return SQL('rank')
+        return cls.bm25(*args) if args else SQL('rank')
 
     @classmethod
     def bm25(cls, *weights):
@@ -619,7 +616,7 @@ class FTS5Model(BaseFTSModel):
                 .order_by(order_by))
 
     @classmethod
-    def _fts_cmd(cls, cmd, **extra_params):
+    def _fts_cmd_sql(cls, cmd, **extra_params):
         tbl = cls._meta.entity
         columns = [tbl]
         values = [cmd]
@@ -627,14 +624,17 @@ class FTS5Model(BaseFTSModel):
             columns.append(Entity(key))
             values.append(value)
 
-        inner_clause = EnclosedClause(tbl)
-        clause = Clause(
+        return NodeList((
             SQL('INSERT INTO'),
             cls._meta.entity,
-            EnclosedClause(*columns),
+            EnclosedNodeList(columns),
             SQL('VALUES'),
-            EnclosedClause(*values))
-        return cls._meta.database.execute(clause)
+            EnclosedNodeList(values)))
+
+    @classmethod
+    def _fts_cmd(cls, cmd, **extra_params):
+        query = cls._fts_cmd_sql(cmd, **extra_params)
+        return cls._meta.database.execute(query)
 
     @classmethod
     def automerge(cls, level):
@@ -966,8 +966,8 @@ if CYTHON_SQLITE_EXTENSIONS:
 
     def __status__(flag, return_highwater=False):
         """
-        Expose a sqlite3_status() call for a particular flag as a property of the
-        Database object.
+        Expose a sqlite3_status() call for a particular flag as a property of
+        the Database object.
         """
         def getter(self):
             result = sqlite_get_status(flag)
@@ -976,11 +976,13 @@ if CYTHON_SQLITE_EXTENSIONS:
 
     def __dbstatus__(flag, return_highwater=False, return_current=False):
         """
-        Expose a sqlite3_dbstatus() call for a particular flag as a property of the
-        Database instance. Unlike sqlite3_status(), the dbstatus properties pertain
-        to the current connection.
+        Expose a sqlite3_dbstatus() call for a particular flag as a property of
+        the Database instance. Unlike sqlite3_status(), the dbstatus properties
+        pertain to the current connection.
         """
         def getter(self):
+            if self._state.conn is None:
+                raise ImproperlyConfigured('database connection not opened.')
             result = sqlite_get_db_status(self._state.conn, flag)
             if return_current:
                 return result[0]

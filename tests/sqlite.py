@@ -17,6 +17,7 @@ from .base import skip_if
 from .base import skip_unless
 from .base_models import User
 from .sqlite_helpers import json_installed
+from .sqlite_helpers import json_patch_installed
 
 
 database = SqliteExtDatabase(':memory:', c_extensions=False, timeout=100)
@@ -128,6 +129,9 @@ class FTS5Test(FTS5Model):
     title = SearchField()
     data = SearchField()
     misc = SearchField(unindexed=True)
+
+    class Meta:
+        legacy_table_names = False
 
 
 class Series(TableFunction):
@@ -399,9 +403,58 @@ class TestJSONField(ModelTestCase):
     def assertData(self, key, expected):
         self.assertEqual(KeyData.get(KeyData.key == key).data, expected)
 
+    def test_json_group_functions(self):
+        with self.database.atomic():
+            KeyData.delete().execute()
+            for i in range(10):
+                # e.g., {v: 0, v0: {items: []}}, {v: 2, v2: {items: [0, 1]}}
+                KeyData.create(key='k%s' % i, data={'v': i, 'v%s' % i: {
+                    'items': list(range(i))}})
+
+        jga_key = fn.json_group_array(KeyData.key)
+        query = (KeyData
+                 .select(jga_key)
+                 .where(KeyData.data['v'] < 4)
+                 .order_by(KeyData.key))
+        self.assertEqual(json.loads(query.scalar()), ['k0', 'k1', 'k2', 'k3'])
+
+        # Can specify json.loads as the converter for the function.
+        query = (KeyData
+                 .select(jga_key.python_value(json.loads))
+                 .where(KeyData.data['v'] > 6)
+                 .order_by(KeyData.key))
+        self.assertEqual(query.scalar(), ['k7', 'k8', 'k9'])
+
+        # Aggregating a list of ints?
+        jga_id = fn.json_group_array(KeyData.id)
+        query = (KeyData
+                 .select(jga_id)
+                 .where(KeyData.data['v'] < 4)
+                 .order_by(KeyData.id))
+        self.assertEqual(json.loads(query.scalar()), [1, 2, 3, 4])
+
+        query = (KeyData
+                 .select(jga_id.python_value(json.loads))
+                 .where(KeyData.data['v'] > 6)
+                 .order_by(KeyData.id))
+        self.assertEqual(query.scalar(), [8, 9, 10])
+
+        # Using json_group_object.
+        jgo_key = fn.json_group_object(KeyData.key, KeyData.data['v'])
+        res = (KeyData
+               .select(jgo_key)
+               .where(KeyData.data['v'] < 4)
+               .scalar())
+        self.assertEqual(json.loads(res), {'k0': 0, 'k1': 1, 'k2': 2, 'k3': 3})
+
+        query = (KeyData
+                 .select(jgo_key.python_value(json.loads))
+                 .where(KeyData.data['v'] < 4))
+        self.assertEqual(query.scalar(), {'k0': 0, 'k1': 1, 'k2': 2, 'k3': 3})
+
     def test_schema(self):
         self.assertSQL(KeyData._schema._create_table(), (
-            'CREATE TABLE IF NOT EXISTS "keydata" ('
+            'CREATE TABLE IF NOT EXISTS "key_data" ('
             '"id" INTEGER NOT NULL PRIMARY KEY, '
             '"key" TEXT NOT NULL, '
             '"data" JSON NOT NULL)'), [])
@@ -433,6 +486,7 @@ class TestJSONField(ModelTestCase):
         self.assertData('a', {'k1': 'v1', 'x1': {'y1': 'z1-x', 'y3': 'z3'}})
         self.assertData('d', {'x1': {'y1': 'z1-x', 'y3': 'z3'}})
 
+    @skip_unless(json_patch_installed())
     def test_update(self):
         merged = KeyData.data.update({'x1': {'y1': 'z1-x', 'y3': 'z3'}})
         query = (KeyData
@@ -444,6 +498,7 @@ class TestJSONField(ModelTestCase):
         self.assertData('a', {'k1': 'v1', 'x1': {'y1': 'z1-x', 'y3': 'z3'}})
         self.assertData('d', {'x1': {'y1': 'z1-x', 'y2': 'z2', 'y3': 'z3'}})
 
+    @skip_unless(json_patch_installed())
     def test_update_with_removal(self):
         m = KeyData.data.update({'k1': None, 'x1': {'y1': None, 'y3': 'z3'}})
         query = KeyData.update(data=m).where(KeyData.data['x1']['y1'] == 'z1')
@@ -453,6 +508,7 @@ class TestJSONField(ModelTestCase):
         self.assertData('a', {'x1': {'y3': 'z3'}})
         self.assertData('d', {'x1': {'y2': 'z2', 'y3': 'z3'}})
 
+    @skip_unless(json_patch_installed())
     def test_update_nested(self):
         merged = KeyData.data['x1'].update({'y1': 'z1-x', 'y3': 'z3'})
         query = (KeyData
@@ -464,6 +520,7 @@ class TestJSONField(ModelTestCase):
         self.assertData('a', {'k1': 'v1', 'x1': {'y1': 'z1-x', 'y3': 'z3'}})
         self.assertData('d', {'x1': {'y1': 'z1-x', 'y2': 'z2', 'y3': 'z3'}})
 
+    @skip_unless(json_patch_installed())
     def test_updated_nested_with_removal(self):
         merged = KeyData.data['x1'].update({'o1': 'p1', 'y1': None})
         nrows = (KeyData
@@ -518,6 +575,7 @@ class TestSqliteExtensions(BaseTestCase):
             class Meta:
                 database = database
                 extension_module = 'ext1337'
+                legacy_table_names = False
                 options = {'huey': 'cat', 'mickey': 'dog'}
                 primary_key = False
 
@@ -528,7 +586,7 @@ class TestSqliteExtensions(BaseTestCase):
             'USING ext1337 '
             '(huey=cat, mickey=dog)'), [])
         self.assertSQL(SubTest._schema._create_table(), (
-            'CREATE VIRTUAL TABLE IF NOT EXISTS "subtest" '
+            'CREATE VIRTUAL TABLE IF NOT EXISTS "sub_test" '
             'USING ext1337 '
             '(huey=cat, mickey=dog)'), [])
         self.assertSQL(
@@ -544,7 +602,7 @@ class TestSqliteExtensions(BaseTestCase):
                 database = database
 
         self.assertSQL(AutoIncrement._schema._create_table(), (
-            'CREATE TABLE IF NOT EXISTS "autoincrement" '
+            'CREATE TABLE IF NOT EXISTS "auto_increment" '
             '("id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, '
             '"data" TEXT NOT NULL)'), [])
 
@@ -1023,7 +1081,7 @@ class TestRowIDField(ModelTestCase):
         query = RowIDModel.select().where(RowIDModel.rowid == 2)
         self.assertSQL(query, (
             'SELECT "t1"."rowid", "t1"."data" '
-            'FROM "rowidmodel" AS "t1" '
+            'FROM "row_id_model" AS "t1" '
             'WHERE ("t1"."rowid" = ?)'), [2])
         r_db = query.get()
         self.assertEqual(r_db.rowid, 2)
@@ -1352,8 +1410,15 @@ class TestFTS5(ModelTestCase):
     def test_create_table(self):
         query = FTS5Test._schema._create_table()
         self.assertSQL(query, (
-            'CREATE VIRTUAL TABLE IF NOT EXISTS "fts5test" USING fts5 '
+            'CREATE VIRTUAL TABLE IF NOT EXISTS "fts5_test" USING fts5 '
             '("title", "data", "misc" UNINDEXED)'), [])
+
+    def test_custom_fts5_command(self):
+        merge_sql = FTS5Test._fts_cmd_sql('merge', rank=4)
+        self.assertSQL(merge_sql, (
+            'INSERT INTO "fts5_test" ("fts5_test", "rank") VALUES (?, ?)'),
+            ['merge', 4])
+        FTS5Test.merge(4)  # Runs without error.
 
     def test_create_table_options(self):
         class Test1(FTS5Model):
@@ -1388,8 +1453,8 @@ class TestFTS5(ModelTestCase):
         query = FTS5Test.search('bb')
         self.assertSQL(query, (
             'SELECT "t1"."rowid", "t1"."title", "t1"."data", "t1"."misc" '
-            'FROM "fts5test" AS "t1" '
-            'WHERE ("fts5test" MATCH ?) ORDER BY rank'), ['bb'])
+            'FROM "fts5_test" AS "t1" '
+            'WHERE ("fts5_test" MATCH ?) ORDER BY rank'), ['bb'])
         self.assertResults(query, ['nug aa dd', 'foo aa bb', 'bar bb cc'])
 
 

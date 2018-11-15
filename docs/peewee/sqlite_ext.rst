@@ -481,7 +481,7 @@ APIs
 
         Remove the data stored in the :py:class:`JSONField`.
 
-        Uses the `json_type <https://www.sqlite.org/json1.html#jrm>`_ function
+        Uses the `json_remove <https://www.sqlite.org/json1.html#jrm>`_ function
         from the json1 extension.
 
     .. py:method:: json_type()
@@ -529,10 +529,34 @@ APIs
         * ``fullkey``: the full path describing the current element.
         * ``path``: the path to the container of the current row.
 
-        For examples, see `my blog post on JSON1 <http://charlesleifer.com/blog/using-the-sqlite-json1-and-fts5-extensions-with-python/>`_.
+        Internally this method uses the `json_each <https://www.sqlite.org/json1.html#jeach>`_
+        (documentation link) function from the json1 extension.
 
-        Uses the `json_each <https://www.sqlite.org/json1.html#jeach>`_
-        function from the json1 extension.
+        Example usage (compare to :py:meth:`~JSONField.tree` method):
+
+        .. code-block:: python
+
+            class KeyData(Model):
+                key = TextField()
+                data = JSONField()
+
+            KeyData.create(key='a', data={'k1': 'v1', 'x1': {'y1': 'z1'}})
+            KeyData.create(key='b', data={'x1': {'y1': 'z1', 'y2': 'z2'}})
+
+            # We will query the KeyData model for the key and all the
+            # top-level keys and values in it's data field.
+            kd = KeyData.data.children().alias('children')
+            query = (KeyData
+                     .select(kd.c.key, kd.c.value, kd.c.fullkey)
+                     .from_(KeyData, kd)
+                     .order_by(kd.c.key)
+                     .tuples())
+            print(query[:])
+
+            # PRINTS:
+            [('a', 'k1', 'v1',                    '$.k1'),
+             ('a', 'x1', '{"y1":"z1"}',           '$.x1'),
+             ('b', 'x1', '{"y1":"z1","y2":"z2"}', '$.x1')]
 
     .. py:method:: tree()
 
@@ -553,10 +577,39 @@ APIs
         * ``fullkey``: the full path describing the current element.
         * ``path``: the path to the container of the current row.
 
-        For examples, see `my blog post on JSON1 <http://charlesleifer.com/blog/using-the-sqlite-json1-and-fts5-extensions-with-python/>`_.
+        Internally this method uses the `json_tree <https://www.sqlite.org/json1.html#jtree>`_
+        (documentation link) function from the json1 extension.
 
-        Uses the `json_tree <https://www.sqlite.org/json1.html#jtree>`_
-        function from the json1 extension.
+        Example usage:
+
+        .. code-block:: python
+
+            class KeyData(Model):
+                key = TextField()
+                data = JSONField()
+
+            KeyData.create(key='a', data={'k1': 'v1', 'x1': {'y1': 'z1'}})
+            KeyData.create(key='b', data={'x1': {'y1': 'z1', 'y2': 'z2'}})
+
+            # We will query the KeyData model for the key and all the
+            # keys and values in it's data field, recursively.
+            kd = KeyData.data.tree().alias('tree')
+            query = (KeyData
+                     .select(kd.c.key, kd.c.value, kd.c.fullkey)
+                     .from_(KeyData, kd)
+                     .order_by(kd.c.key)
+                     .tuples())
+            print(query[:])
+
+            # PRINTS:
+            [('a',  None,  '{"k1":"v1","x1":{"y1":"z1"}}', '$'),
+             ('b',  None,  '{"x1":{"y1":"z1","y2":"z2"}}', '$'),
+             ('a',  'k1',  'v1',                           '$.k1'),
+             ('a',  'x1',  '{"y1":"z1"}',                  '$.x1'),
+             ('b',  'x1',  '{"y1":"z1","y2":"z2"}',        '$.x1'),
+             ('a',  'y1',  'z1',                           '$.x1.y1'),
+             ('b',  'y1',  'z1',                           '$.x1.y1'),
+             ('b',  'y2',  'z2',                           '$.x1.y2')]
 
 
 .. py:class:: JSONPath(field[, path=None])
@@ -938,7 +991,7 @@ APIs
 
     .. py:classmethod:: rank([col1_weight, col2_weight...coln_weight])
 
-        :param float col_weight: (Optional) weight to give to the *i*th column
+        :param float col_weight: (Optional) weight to give to the *ith* column
             of the model. By default all columns have a weight of ``1.0``.
 
         Generate an expression that will calculate and return the quality of
@@ -971,7 +1024,7 @@ APIs
 
     .. py:classmethod:: bm25([col1_weight, col2_weight...coln_weight])
 
-        :param float col_weight: (Optional) weight to give to the *i*th column
+        :param float col_weight: (Optional) weight to give to the *ith* column
             of the model. By default all columns have a weight of ``1.0``.
 
         Generate an expression that will calculate and return the quality of
@@ -1101,7 +1154,7 @@ APIs
 
     .. py:classmethod:: rank([col1_weight, col2_weight...coln_weight])
 
-        :param float col_weight: (Optional) weight to give to the *i*th column
+        :param float col_weight: (Optional) weight to give to the *ith* column
             of the model. By default all columns have a weight of ``1.0``.
 
         Generate an expression that will calculate and return the quality of
