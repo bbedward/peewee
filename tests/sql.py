@@ -113,6 +113,21 @@ class TestSelectQuery(BaseTestCase):
             'SELECT "t2"."id" FROM "users" AS "t2" WHERE ("t2"."username" = ?)'
             ') AS "sq") AS "is_huey" FROM "tweets" AS "t1"'), ['huey'])
 
+    def test_subquery_in_select_expression_sql(self):
+        Point = Table('point', ('x', 'y'))
+        PA = Point.alias('pa')
+
+        subq = PA.select(fn.SUM(PA.y).alias('sa')).where(PA.x == Point.x)
+        query = (Point
+                 .select(Point.x, Point.y, subq.alias('sy'))
+                 .order_by(Point.x, Point.y))
+        self.assertSQL(query, (
+            'SELECT "t1"."x", "t1"."y", ('
+            'SELECT SUM("pa"."y") AS "sa" FROM "point" AS "pa" '
+            'WHERE ("pa"."x" = "t1"."x")) AS "sy" '
+            'FROM "point" AS "t1" '
+            'ORDER BY "t1"."x", "t1"."y"'), [])
+
     def test_from_clause(self):
         query = (Note
                  .select(Note.content, Person.name)
@@ -205,6 +220,17 @@ class TestSelectQuery(BaseTestCase):
             'WHERE (("t1"."dob" < ?) AND ("t1"."dob" > ?))'),
             [datetime.date(1980, 1, 1), datetime.date(1950, 1, 1)])
 
+    def test_orwhere(self):
+        query = (Person
+                 .select(Person.name)
+                 .orwhere(Person.dob > datetime.date(1980, 1, 1))
+                 .orwhere(Person.dob < datetime.date(1950, 1, 1)))
+        self.assertSQL(query, (
+            'SELECT "t1"."name" '
+            'FROM "person" AS "t1" '
+            'WHERE (("t1"."dob" > ?) OR ("t1"."dob" < ?))'),
+            [datetime.date(1980, 1, 1), datetime.date(1950, 1, 1)])
+
     def test_simple_join(self):
         query = (User
                  .select(
@@ -232,6 +258,18 @@ class TestSelectQuery(BaseTestCase):
             'FROM "tweets" AS "t2" '
             'WHERE ("t2"."user" = "t1"."id")) AS "iq" '
             'FROM "users" AS "t1" ORDER BY "t1"."username"'), [])
+
+    def test_subquery_in_expr(self):
+        Team = Table('team')
+        Challenge = Table('challenge')
+        subq = Team.select(fn.COUNT(Team.c.id) + 1)
+        query = (Challenge
+                 .select((Challenge.c.points / subq).alias('score'))
+                 .order_by(SQL('score')))
+        self.assertSQL(query, (
+            'SELECT ("t1"."points" / ('
+            'SELECT (COUNT("t2"."id") + ?) FROM "team" AS "t2")) AS "score" '
+            'FROM "challenge" AS "t1" ORDER BY score'), [1])
 
     def test_user_defined_alias(self):
         UA = User.alias('alt')
@@ -318,6 +356,61 @@ class TestSelectQuery(BaseTestCase):
             'WHERE ("n" < ?)) '
             'SELECT "fibonacci"."n", "fibonacci"."fib_n" '
             'FROM "fibonacci"'), [1, 0, 1, 1, 10])
+
+    def test_cte_with_count(self):
+        cte = User.select(User.c.id).cte('user_ids')
+        query = (User
+                 .select(User.c.username)
+                 .join(cte, on=(User.c.id == cte.c.id))
+                 .with_cte(cte))
+        count = Select([query], [fn.COUNT(SQL('1'))])
+        self.assertSQL(count, (
+            'SELECT COUNT(1) FROM ('
+            'WITH "user_ids" AS (SELECT "t1"."id" FROM "users" AS "t1") '
+            'SELECT "t2"."username" FROM "users" AS "t2" '
+            'INNER JOIN "user_ids" ON ("t2"."id" = "user_ids"."id")) '
+            'AS "t3"'), [])
+
+    def test_cte_subquery_in_expression(self):
+        Order = Table('order', ('id', 'description'))
+        Item = Table('item', ('id', 'order_id', 'description'))
+
+        cte = Order.select(fn.MAX(Order.id).alias('max_id')).cte('max_order')
+        qexpr = (Order
+                 .select(Order.id)
+                 .join(cte, on=(Order.id == cte.c.max_id))
+                 .with_cte(cte))
+        query = (Item
+                 .select(Item.id, Item.order_id, Item.description)
+                 .where(Item.order_id.in_(qexpr)))
+        self.assertSQL(query, (
+            'SELECT "t1"."id", "t1"."order_id", "t1"."description" '
+            'FROM "item" AS "t1" '
+            'WHERE ("t1"."order_id" IN ('
+            'WITH "max_order" AS ('
+            'SELECT MAX("t2"."id") AS "max_id" FROM "order" AS "t2") '
+            'SELECT "t3"."id" '
+            'FROM "order" AS "t3" '
+            'INNER JOIN "max_order" '
+            'ON ("t3"."id" = "max_order"."max_id")))'), [])
+
+    def test_multi_update_cte(self):
+        data = [(i, 'u%sx' % i) for i in range(1, 3)]
+        vl = ValuesList(data)
+        cte = vl.select().cte('uv', columns=('id', 'username'))
+        subq = cte.select(cte.c.username).where(cte.c.id == User.c.id)
+        query = (User
+                 .update(username=subq)
+                 .where(User.c.id.in_(cte.select(cte.c.id)))
+                 .with_cte(cte))
+        self.assertSQL(query, (
+            'WITH "uv" ("id", "username") AS ('
+            'SELECT * FROM (VALUES (?, ?), (?, ?)) AS "t1") '
+            'UPDATE "users" SET "username" = ('
+            'SELECT "uv"."username" FROM "uv" '
+            'WHERE ("uv"."id" = "users"."id")) '
+            'WHERE ("users"."id" IN (SELECT "uv"."id" FROM "uv"))'),
+            [1, 'u1x', 2, 'u2x'])
 
     def test_complex_select(self):
         Order = Table('orders', columns=(
@@ -422,6 +515,107 @@ class TestSelectQuery(BaseTestCase):
             'FROM "users" AS "t2" '
             'WHERE ("t2"."is_admin" = ?)'), ['editor', 1, 'admin', 1])
 
+    def test_compound_parentheses_handling(self):
+        admin = (User
+                 .select(User.c.username, Value('admin').alias('role'))
+                 .where(User.c.is_admin == True)
+                 .order_by(User.c.id.desc())
+                 .limit(3))
+        editors = (User
+                   .select(User.c.username, Value('editor').alias('role'))
+                   .where(User.c.is_editor == True)
+                   .order_by(User.c.id.desc())
+                   .limit(5))
+
+        self.assertSQL((admin | editors), (
+            '(SELECT "t1"."username", ? AS "role" FROM "users" AS "t1" '
+            'WHERE ("t1"."is_admin" = ?) ORDER BY "t1"."id" DESC LIMIT ?) '
+            'UNION '
+            '(SELECT "t2"."username", ? AS "role" FROM "users" AS "t2" '
+            'WHERE ("t2"."is_editor" = ?) ORDER BY "t2"."id" DESC LIMIT ?)'),
+            ['admin', 1, 3, 'editor', 1, 5], compound_select_parentheses=True)
+
+        Reg = Table('register', ('value',))
+        lhs = Reg.select().where(Reg.value < 2)
+        rhs = Reg.select().where(Reg.value > 7)
+        compound = lhs | rhs
+
+        for csq_setting in (1, 2):
+            self.assertSQL(compound, (
+                '(SELECT "t1"."value" FROM "register" AS "t1" '
+                'WHERE ("t1"."value" < ?)) '
+                'UNION '
+                '(SELECT "t2"."value" FROM "register" AS "t2" '
+                'WHERE ("t2"."value" > ?))'),
+                [2, 7], compound_select_parentheses=csq_setting)
+
+        rhs2 = Reg.select().where(Reg.value == 5)
+        c2 = compound | rhs2
+
+        # CSQ = always, we get nested parentheses.
+        self.assertSQL(c2, (
+            '((SELECT "t1"."value" FROM "register" AS "t1" '
+            'WHERE ("t1"."value" < ?)) '
+            'UNION '
+            '(SELECT "t2"."value" FROM "register" AS "t2" '
+            'WHERE ("t2"."value" > ?))) '
+            'UNION '
+            '(SELECT "t2"."value" FROM "register" AS "t2" '
+            'WHERE ("t2"."value" = ?))'),
+            [2, 7, 5], compound_select_parentheses=1)  # Always.
+
+        # CSQ = unnested, no nesting but all individual queries have parens.
+        self.assertSQL(c2, (
+            '(SELECT "t1"."value" FROM "register" AS "t1" '
+            'WHERE ("t1"."value" < ?)) '
+            'UNION '
+            '(SELECT "t2"."value" FROM "register" AS "t2" '
+            'WHERE ("t2"."value" > ?)) '
+            'UNION '
+            '(SELECT "t2"."value" FROM "register" AS "t2" '
+            'WHERE ("t2"."value" = ?))'),
+            [2, 7, 5], compound_select_parentheses=2)  # Un-nested.
+
+    def test_compound_select_order_limit(self):
+        A = Table('a', ('col_a',))
+        B = Table('b', ('col_b',))
+        C = Table('c', ('col_c',))
+        q1 = A.select(A.col_a.alias('foo'))
+        q2 = B.select(B.col_b.alias('foo'))
+        q3 = C.select(C.col_c.alias('foo'))
+        qc = (q1 | q2 | q3)
+        qc = qc.order_by(qc.c.foo.desc()).limit(3)
+
+        self.assertSQL(qc, (
+            'SELECT "t1"."col_a" AS "foo" FROM "a" AS "t1" UNION '
+            'SELECT "t2"."col_b" AS "foo" FROM "b" AS "t2" UNION '
+            'SELECT "t3"."col_c" AS "foo" FROM "c" AS "t3" '
+            'ORDER BY "foo" DESC LIMIT ?'), [3])
+
+        self.assertSQL(qc, (
+            '((SELECT "t1"."col_a" AS "foo" FROM "a" AS "t1") UNION '
+            '(SELECT "t2"."col_b" AS "foo" FROM "b" AS "t2")) UNION '
+            '(SELECT "t3"."col_c" AS "foo" FROM "c" AS "t3") '
+            'ORDER BY "foo" DESC LIMIT ?'),
+            [3], compound_select_parentheses=1)
+
+    def test_compound_select_as_subquery(self):
+        A = Table('a', ('col_a',))
+        B = Table('b', ('col_b',))
+        q1 = A.select(A.col_a.alias('foo'))
+        q2 = B.select(B.col_b.alias('foo'))
+        union = q1 | q2
+
+        # Create an outer query and do grouping.
+        outer = (union
+                 .select_from(union.c.foo, fn.COUNT(union.c.foo).alias('ct'))
+                 .group_by(union.c.foo))
+        self.assertSQL(outer, (
+            'SELECT "t1"."foo", COUNT("t1"."foo") AS "ct" FROM ('
+            'SELECT "t2"."col_a" AS "foo" FROM "a" AS "t2" UNION '
+            'SELECT "t3"."col_b" AS "foo" FROM "b" AS "t3") AS "t1" '
+            'GROUP BY "t1"."foo"'), [])
+
     def test_join_on_query(self):
         inner = User.select(User.c.id).alias('j1')
         query = (Tweet
@@ -482,6 +676,21 @@ class TestSelectQuery(BaseTestCase):
                  .select(Person.id)
                  .where(name_dob == Tuple('foo', '2017-01-01')))
         self.assertSQL(query, expected, ['foo', '2017-01-01'])
+
+    def test_tuple_comparison_subquery(self):
+        PA = Person.alias('pa')
+        subquery = (PA
+                    .select(PA.name, PA.id)
+                    .where(PA.name != 'huey'))
+
+        query = (Person
+                 .select(Person.name)
+                 .where(Tuple(Person.name, Person.id).in_(subquery)))
+        self.assertSQL(query, (
+            'SELECT "t1"."name" FROM "person" AS "t1" '
+            'WHERE (("t1"."name", "t1"."id") IN ('
+            'SELECT "pa"."name", "pa"."id" FROM "person" AS "pa" '
+            'WHERE ("pa"."name" != ?)))'), ['huey'])
 
     def test_empty_in(self):
         query = User.select(User.c.id).where(User.c.username.in_([]))
@@ -1014,6 +1223,27 @@ class TestWindowFunctions(BaseTestCase):
             'FROM "register" AS "t1" '
             'ORDER BY "t1"."category"'), [1])
 
+    def test_window_in_orderby(self):
+        Register = Table('register', ['id', 'value'])
+        w = Window(partition_by=[Register.value], order_by=[Register.id])
+        query = (Register
+                 .select()
+                 .window(w)
+                 .order_by(fn.FIRST_VALUE(Register.id).over(w)))
+        self.assertSQL(query, (
+            'SELECT "t1"."id", "t1"."value" FROM "register" AS "t1" '
+            'WINDOW w AS (PARTITION BY "t1"."value" ORDER BY "t1"."id") '
+            'ORDER BY FIRST_VALUE("t1"."id") OVER w'), [])
+
+        fv = fn.FIRST_VALUE(Register.id).over(
+            partition_by=[Register.value],
+            order_by=[Register.id])
+        query = Register.select().order_by(fv)
+        self.assertSQL(query, (
+            'SELECT "t1"."id", "t1"."value" FROM "register" AS "t1" '
+            'ORDER BY FIRST_VALUE("t1"."id") '
+            'OVER (PARTITION BY "t1"."value" ORDER BY "t1"."id")'), [])
+
 
 class TestValuesList(BaseTestCase):
     _data = [(1, 'one'), (2, 'two'), (3, 'three')]
@@ -1064,6 +1294,18 @@ class TestValuesList(BaseTestCase):
             'SELECT "v"."idx", "v"."name" '
             'FROM (VALUES (?, ?), (?, ?)) AS "v"("idx", "name")'),
             [1, 'first', 2, 'second'])
+
+    def test_join_on_valueslist(self):
+        vl = ValuesList([('huey',), ('zaizee',)], columns=['username'])
+        query = (User
+                 .select(vl.c.username)
+                 .join(vl, on=(User.c.username == vl.c.username))
+                 .order_by(vl.c.username.desc()))
+        self.assertSQL(query, (
+            'SELECT "t1"."username" FROM "users" AS "t2" '
+            'INNER JOIN (VALUES (?), (?)) AS "t1"("username") '
+            'ON ("t2"."username" = "t1"."username") '
+            'ORDER BY "t1"."username" DESC'), ['huey', 'zaizee'])
 
 
 class TestCaseFunction(BaseTestCase):
@@ -1160,6 +1402,19 @@ class TestSelectFeatures(BaseTestCase):
             'WHERE ("t1"."name" = ?) '
             'FOR SHARE NOWAIT'), ['charlie'], for_update=True)
 
+    def test_for_update_nested(self):
+        PA = Person.alias('pa')
+        subq = PA.select(PA.id).where(PA.name == 'charlie').for_update()
+        query = (Person
+                 .delete()
+                 .where(Person.id.in_(subq)))
+        self.assertSQL(query, (
+            'DELETE FROM "person" WHERE ("person"."id" IN ('
+            'SELECT "pa"."id" FROM "person" AS "pa" '
+            'WHERE ("pa"."name" = ?) FOR UPDATE))'),
+            ['charlie'],
+            for_update=True)
+
     def test_parentheses(self):
         query = (Person
                  .select(fn.MAX(
@@ -1207,6 +1462,10 @@ class TestOnConflictSqlite(BaseTestCase):
 class TestOnConflictMySQL(BaseTestCase):
     database = MySQLDatabase(None)
 
+    def setUp(self):
+        super(TestOnConflictMySQL, self).setUp()
+        self.database._server_version = None
+
     def test_replace(self):
         query = Person.insert(name='huey').on_conflict('replace')
         self.assertSQL(query, (
@@ -1233,6 +1492,24 @@ class TestOnConflictMySQL(BaseTestCase):
         query = (Person
                  .insert(name='huey', dob=dob)
                  .on_conflict(preserve='dob'))
+        self.assertSQL(query, (
+            'INSERT INTO "person" ("dob", "name") VALUES (?, ?) '
+            'ON DUPLICATE KEY '
+            'UPDATE "dob" = VALUES("dob")'), [dob, 'huey'])
+
+    def test_update_use_value_mariadb(self):
+        # Verify that we use "VALUE" (not "VALUES") for MariaDB 10.3.3.
+        dob = datetime.date(2010, 1, 1)
+        query = (Person
+                 .insert(name='huey', dob=dob)
+                 .on_conflict(preserve=(Person.dob,)))
+        self.database._server_version = (10, 3, 3)
+        self.assertSQL(query, (
+            'INSERT INTO "person" ("dob", "name") VALUES (?, ?) '
+            'ON DUPLICATE KEY '
+            'UPDATE "dob" = VALUE("dob")'), [dob, 'huey'])
+
+        self.database._server_version = (10, 3, 2)
         self.assertSQL(query, (
             'INSERT INTO "person" ("dob", "name") VALUES (?, ?) '
             'ON DUPLICATE KEY '
@@ -1327,6 +1604,26 @@ class TestOnConflictPostgresql(BaseTestCase):
             'UPDATE SET "dob" = EXCLUDED."dob", '
             '"name" = ("person"."name" || ?) '
             'WHERE ("person"."name" != ?)'), ['huey', '-x', 'zaizee'])
+
+    def test_conflict_target_partial_index(self):
+        KVE = Table('kve', ('key', 'value', 'extra'))
+        data = [('k1', 1, 2), ('k2', 2, 3)]
+        columns = [KVE.key, KVE.value, KVE.extra]
+
+        query = (KVE
+                 .insert(data, columns)
+                 .on_conflict(
+                     conflict_target=(KVE.key, KVE.value),
+                     conflict_where=(KVE.extra > 1),
+                     preserve=(KVE.extra,),
+                     where=(KVE.key != 'kx')))
+        self.assertSQL(query, (
+            'INSERT INTO "kve" ("key", "value", "extra") '
+            'VALUES (?, ?, ?), (?, ?, ?) '
+            'ON CONFLICT ("key", "value") WHERE ("extra" > ?) '
+            'DO UPDATE SET "extra" = EXCLUDED."extra" '
+            'WHERE ("kve"."key" != ?)'),
+            ['k1', 1, 2, 'k2', 2, 3, 1, 'kx'])
 
 
 #Person = Table('person', ['id', 'name', 'dob'])

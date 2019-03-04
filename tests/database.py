@@ -481,8 +481,8 @@ class TestIntrospection(ModelTestCase):
                                       'WHERE status = 9 ORDER BY id DESC')
             try:
                 views = self.database.get_views()
-                self.assertEqual([normalize_view_meta(v) for v in views],
-                                 expected)
+                normalized = sorted([normalize_view_meta(v) for v in views])
+                self.assertEqual(normalized, expected)
 
                 # Ensure that we can use get_columns to introspect views.
                 columns = self.database.get_columns('notes_deleted')
@@ -598,6 +598,29 @@ class TestDBProxy(BaseTestCase):
         self.assertFalse(User._meta.database.is_closed())
         self.assertFalse(Tweet._meta.database.is_closed())
         sqlite_db.close()
+
+    def test_proxy_decorator(self):
+        db = DatabaseProxy()
+
+        @db.connection_context()
+        def with_connection():
+            self.assertFalse(db.is_closed())
+
+        @db.atomic()
+        def with_transaction():
+            self.assertTrue(db.in_transaction())
+
+        @db.manual_commit()
+        def with_manual_commit():
+            self.assertTrue(db.in_transaction())
+
+        db.initialize(SqliteDatabase(':memory:'))
+        with_connection()
+        self.assertTrue(db.is_closed())
+        with_transaction()
+        self.assertFalse(db.in_transaction())
+        with_manual_commit()
+        self.assertFalse(db.in_transaction())
 
 
 class Data(TestModel):

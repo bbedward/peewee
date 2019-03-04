@@ -7,19 +7,118 @@ https://github.com/coleifer/peewee/releases
 
 ## master
 
+* MariaDB 10.3.3 introduces backwards-incompatible changes to the SQL used for
+  upsert. Peewee now introspects the MySQL server version at connection time to
+  ensure proper handling of version-specific features. See #1834 for details.
+* Improvements to `sqlite_ext.JSONField` regarding the serialization of data,
+  as well as the addition of options to override the JSON serialization and
+  de-serialization functions.
+* Added `DatabaseProxy`, which allows one to use database-specific decorators
+  with an uninitialized `Proxy` object. See #1842 for discussion.
+* Added support for `INSERT ... ON CONFLICT` when the conflict target is a
+  partial index (e.g., contains a WHERE clause). The `OnConflict` and
+  `on_conflict()` APIs now take an additional `conflict_where` parameter to
+  represent the WHERE clause of the partial index in question. See #1860.
+
+[View commits](https://github.com/coleifer/peewee/compare/3.8.2...master)
+
+## 3.8.2
+
+**Backwards-incompatible changes**
+
+* The default row-type for `INSERT` queries executed with a non-default
+  `RETURNING` clause has changed from `tuple` to `Model` instances. This makes
+  `INSERT` behavior consistent with `UPDATE` and `DELETE` queries that specify
+  a `RETURNING` clause. To revert back to the old behavior, just append a call
+  to `.tuples()` to your `INSERT ... RETURNING` query.
+* Removing support for the `table_alias` model `Meta` option. Previously, this
+  attribute could be used to specify a "vanity" alias for a model class in the
+  generated SQL. As a result of some changes to support more robust UPDATE and
+  DELETE queries, supporting this feature will require some re-working. As of
+  the 3.8.0 release, it was broken and resulted in incorrect SQL for UPDATE
+  queries, so now it is removed.
+
+**New features**
+
+* Added `playhouse.shortcuts.ReconnectMixin`, which can be used to implement
+  automatic reconnect under certain error conditions (notably the MySQL error
+  2006 - server has gone away).
+
+**Bugfixes**
+
+* Fix SQL generation bug when using an inline window function in the `ORDER BY`
+  clause of a query.
+* Fix possible zero-division in user-defined implementation of BM25 ranking
+  algorithm for SQLite full-text search.
+
+[View commits](https://github.com/coleifer/peewee/compare/3.8.1...3.8.2)
+
+## 3.8.1
+
+**New features**
+
+* Sqlite `SearchField` now supports the `match()` operator, allowing full-text
+  search to be performed on a single column (as opposed to the whole table).
+
+**Changes**
+
+* Remove minimum passphrase restrictions in SQLCipher integration.
+
+**Bugfixes**
+
+* Support inheritance of `ManyToManyField` instances.
+* Ensure operator overloads are invoked when generating filter expressions.
+* Fix incorrect scoring in Sqlite BM25, BM25f and Lucene ranking algorithms.
+* Support string field-names in data dictionary when performing an ON CONFLICT
+  ... UPDATE query, which allows field-specific conversions to be applied.
+  References #1815.
+
+[View commits](https://github.com/coleifer/peewee/compare/3.8.0...3.8.1)
+
+## 3.8.0
+
+**New features**
+
+* Postgres `BinaryJSONField` now supports `has_key()`, `concat()` and
+  `remove()` methods (though remove may require pg10+).
+* Add `python_value()` method to the SQL-function helper `fn`, to allow
+  specifying a custom function for mapping database values to Python values.
+
+**Changes**
+
 * Better support for UPDATE ... FROM queries, and more generally, more robust
   support for UPDATE and RETURNING clauses. This means that the
   `QualifiedNames` helper is no longer needed for certain types of queries.
-* Add `python_value()` method to the SQL-function helper `fn`, to allow
-  specifying a custom function for mapping database values to Python values.
-* Fixed bug in `order_by_extend()`, thanks @nhatHero.
-* Fixed bug where the `DataSet` CSV import/export did not support non-ASCII
-  characters in Python 3.x.
+* The `SqlCipherDatabase` no longer accepts a `kdf_iter` parameter. To
+  configure the various SQLCipher encryption settings, specify the setting
+  values as `pragmas` when initializing the database.
+* Introspection will now, by default, only strip "_id" from introspected column
+  names if those columns are foreign-keys. See #1799 for discussion.
 * Allow `UUIDField` and `BinaryUUIDField` to accept hexadecimal UUID strings as
   well as raw binary UUID bytestrings (in addition to `UUID` instances, which
   are already supported).
+* Allow `ForeignKeyField` to be created without an index.
+* Allow multiple calls to `cast()` to be chained (#1795).
+* Add logic to ensure foreign-key constraint names that exceed 64 characters
+  are truncated using the same logic as is currently in place for long indexes.
+* `ManyToManyField` supports foreign-keys to fields other than primary-keys.
+* When linked against SQLite 3.26 or newer, support `SQLITE_CONSTRAINT` to
+  designate invalid queries against virtual tables.
+* SQL-generation changes to aid in supporting using queries within expressions
+  following the SELECT statement.
 
-[View commits](https://github.com/coleifer/peewee/compare/3.7.1...master)
+**Bugfixes**
+
+* Fixed bug in `order_by_extend()`, thanks @nhatHero.
+* Fixed bug where the `DataSet` CSV import/export did not support non-ASCII
+  characters in Python 3.x.
+* Fixed bug where `model_to_dict` would attempt to traverse explicitly disabled
+  foreign-key backrefs (#1785).
+* Fixed bug when attempting to migrate SQLite tables that have a field whose
+  column-name begins with "primary_".
+* Fixed bug with inheriting deferred foreign-keys.
+
+[View commits](https://github.com/coleifer/peewee/compare/3.7.1...3.8.0)
 
 ## 3.7.1
 

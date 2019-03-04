@@ -47,7 +47,7 @@ connection and model classes.
 
     The ``db`` object will be used to manage the connections to the Sqlite
     database. In this example we're using :py:class:`SqliteDatabase`, but you
-    could also use one of the other :ref:`database engines <databases>`.
+    could also use one of the other :ref:`database engines <database>`.
 
 2. Create a base model class which specifies our database.
 
@@ -733,7 +733,6 @@ Option                  Meaning                                                I
 ``table_settings``      list of setting strings to go after close parentheses  yes
 ``temporary``           indicate temporary table                               yes
 ``legacy_table_names``  use legacy table name generation (enabled by default)  yes
-``table_alias``         an alias to use for the table in queries               no
 ``depends_on``          indicate this table depends on another for creation    no
 ``without_rowid``       indicate table should not have rowid (SQLite only)     no
 ======================  ====================================================== ====================

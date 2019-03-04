@@ -128,7 +128,9 @@ from peewee import Expression
 from peewee import Node
 from peewee import NodeList
 from peewee import OP
+from peewee import callable_
 from peewee import sort_models
+from peewee import _truncate_constraint_name
 
 
 class Operation(object):
@@ -199,7 +201,7 @@ class SchemaMigrator(object):
     @operation
     def apply_default(self, table, column_name, field):
         default = field.default
-        if callable(default):
+        if callable_(default):
             default = default()
 
         return (self.make_context()
@@ -282,7 +284,7 @@ class SchemaMigrator(object):
                .literal('ALTER TABLE ')
                .sql(Entity(table))
                .literal(' ADD CONSTRAINT ')
-               .sql(Entity(constraint))
+               .sql(Entity(_truncate_constraint_name(constraint)))
                .literal(' FOREIGN KEY ')
                .sql(EnclosedNodeList((Entity(column_name),)))
                .literal(' REFERENCES ')
@@ -664,6 +666,7 @@ class SqliteMigrator(SchemaMigrator):
         new_column_defs = []
         new_column_names = []
         original_column_names = []
+        constraint_terms = ('foreign ', 'primary ', 'constraint ')
 
         for column_def in column_defs:
             column_name, = self.column_name_re.match(column_def).groups()
@@ -678,7 +681,9 @@ class SqliteMigrator(SchemaMigrator):
                     new_column_names.append(column_name)
             else:
                 new_column_defs.append(column_def)
-                if not column_name.lower().startswith(('foreign', 'primary')):
+
+                # Avoid treating constraints as columns.
+                if not column_def.lower().startswith(constraint_terms):
                     new_column_names.append(column_name)
                     original_column_names.append(column_name)
 

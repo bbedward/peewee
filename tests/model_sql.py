@@ -5,6 +5,7 @@ from peewee import Database
 from peewee import ModelIndex
 
 from .base import get_in_memory_db
+from .base import requires_postgresql
 from .base import BaseTestCase
 from .base import ModelDatabaseTestCase
 from .base import TestModel
@@ -512,8 +513,6 @@ class TestModelSQL(ModelDatabaseTestCase):
     def test_aliases(self):
         class A(TestModel):
             a = CharField()
-            class Meta:
-                table_alias = 'a_tbl'
         class B(TestModel):
             b = CharField()
             a_link = ForeignKeyField(A)
@@ -523,8 +522,6 @@ class TestModelSQL(ModelDatabaseTestCase):
         class D(TestModel):
             d = CharField()
             c_link = ForeignKeyField(C)
-            class Meta:
-                table_alias = 'd_tbl'
 
         query = (D
                  .select(D.d, C.c)
@@ -532,13 +529,13 @@ class TestModelSQL(ModelDatabaseTestCase):
                  .where(C.b_link << (
                      B.select(B.id).join(A).where(A.a == 'a'))))
         self.assertSQL(query, (
-            'SELECT "d_tbl"."d", "t1"."c" '
-            'FROM "d" AS "d_tbl" '
-            'INNER JOIN "c" AS "t1" ON ("d_tbl"."c_link_id" = "t1"."id") '
-            'WHERE ("t1"."b_link_id" IN ('
-            'SELECT "t2"."id" FROM "b" AS "t2" '
-            'INNER JOIN "a" AS "a_tbl" ON ("t2"."a_link_id" = "a_tbl"."id") '
-            'WHERE ("a_tbl"."a" = ?)))'), ['a'])
+            'SELECT "t1"."d", "t2"."c" '
+            'FROM "d" AS "t1" '
+            'INNER JOIN "c" AS "t2" ON ("t1"."c_link_id" = "t2"."id") '
+            'WHERE ("t2"."b_link_id" IN ('
+            'SELECT "t3"."id" FROM "b" AS "t3" '
+            'INNER JOIN "a" AS "t4" ON ("t3"."a_link_id" = "t4"."id") '
+            'WHERE ("t4"."a" = ?)))'), ['a'])
 
     def test_schema(self):
         class WithSchema(TestModel):
@@ -551,6 +548,52 @@ class TestModelSQL(ModelDatabaseTestCase):
             'SELECT "t1"."data" '
             'FROM "huey"."with_schema" AS "t1" '
             'WHERE ("t1"."data" = ?)'), ['zaizee'])
+
+
+@requires_postgresql
+class TestOnConflictSQL(ModelDatabaseTestCase):
+    requires = [Emp, OCTest, UKVP]
+
+    def test_atomic_update(self):
+        query = OCTest.insert(a='foo', b=1).on_conflict(
+            conflict_target=(OCTest.a,),
+            update={OCTest.b: OCTest.b + 2})
+
+        self.assertSQL(query, (
+            'INSERT INTO "oc_test" ("a", "b", "c") VALUES (?, ?, ?) '
+            'ON CONFLICT ("a") '
+            'DO UPDATE SET "b" = ("oc_test"."b" + ?) '
+            'RETURNING "oc_test"."id"'), ['foo', 1, 0, 2])
+
+    def test_update_where_clause(self):
+        # Add a new row with the given "a" value. If a conflict occurs,
+        # re-insert with b=b+2 so long as the original b < 3.
+        query = OCTest.insert(a='foo', b=1).on_conflict(
+            conflict_target=(OCTest.a,),
+            update={OCTest.b: OCTest.b + 2},
+            where=(OCTest.b < 3))
+        self.assertSQL(query, (
+            'INSERT INTO "oc_test" ("a", "b", "c") VALUES (?, ?, ?) '
+            'ON CONFLICT ("a") DO UPDATE SET "b" = ("oc_test"."b" + ?) '
+            'WHERE ("oc_test"."b" < ?) '
+            'RETURNING "oc_test"."id"'), ['foo', 1, 0, 2, 3])
+
+    def test_conflict_target_constraint_where(self):
+        fields = [UKVP.key, UKVP.value, UKVP.extra]
+        data = [('k1', 1, 2), ('k2', 2, 3)]
+
+        query = (UKVP.insert_many(data, fields)
+                 .on_conflict(conflict_target=(UKVP.key, UKVP.value),
+                              conflict_where=(UKVP.extra > 1),
+                              preserve=(UKVP.extra,),
+                              where=(UKVP.key != 'kx')))
+        self.assertSQL(query, (
+            'INSERT INTO "ukvp" ("key", "value", "extra") '
+            'VALUES (?, ?, ?), (?, ?, ?) '
+            'ON CONFLICT ("key", "value") WHERE ("extra" > ?) '
+            'DO UPDATE SET "extra" = EXCLUDED."extra" '
+            'WHERE ("ukvp"."key" != ?) RETURNING "ukvp"."id"'),
+            ['k1', 1, 2, 'k2', 2, 3, 1, 'kx'])
 
 
 class TestStringsForFieldsa(ModelDatabaseTestCase):

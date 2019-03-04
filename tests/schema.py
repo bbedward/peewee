@@ -135,6 +135,17 @@ class TestModelDDL(ModelDatabaseTestCase):
             ('CREATE INDEX "article_foo" ON "article" ("flags" & 3)', []),
         ])
 
+    def test_model_index_types(self):
+        class Event(TestModel):
+            key = TextField()
+            timestamp = TimestampField(index=True, index_type='BRIN')
+            class Meta:
+                database = self.database
+
+        self.assertIndexes(Event, [
+            ('CREATE INDEX "event_timestamp" ON "event" '
+             'USING BRIN ("timestamp")', [])])
+
     def test_model_indexes_custom_tablename(self):
         class KV(TestModel):
             key = TextField()
@@ -526,6 +537,59 @@ class TestModelDDL(ModelDatabaseTestCase):
             'ALTER TABLE "language" ADD CONSTRAINT '
             '"fk_language_selected_snippet_id_refs_snippet" '
             'FOREIGN KEY ("selected_snippet_id") REFERENCES "snippet" ("id")'))
+
+        class SnippetComment(TestModel):
+            snippet_long_foreign_key_identifier = ForeignKeyField(Snippet)
+            comment = TextField()
+            class Meta:
+                database = self.database
+
+        sql, params = SnippetComment._schema._create_table(safe=True).query()
+        self.assertEqual(sql, (
+            'CREATE TABLE IF NOT EXISTS "snippet_comment" ('
+            '"id" INTEGER NOT NULL PRIMARY KEY, '
+            '"snippet_long_foreign_key_identifier_id" INTEGER NOT NULL, '
+            '"comment" TEXT NOT NULL, '
+            'FOREIGN KEY ("snippet_long_foreign_key_identifier_id") '
+            'REFERENCES "snippet" ("id"))'))
+
+        sql, params = (SnippetComment._schema
+                       ._create_foreign_key(
+                           SnippetComment.snippet_long_foreign_key_identifier)
+                       .query())
+        self.assertEqual(sql, (
+            'ALTER TABLE "snippet_comment" ADD CONSTRAINT "'
+            'fk_snippet_comment_snippet_long_foreign_key_identifier_i_2a8b87d"'
+            ' FOREIGN KEY ("snippet_long_foreign_key_identifier_id") '
+            'REFERENCES "snippet" ("id")'))
+
+    def test_deferred_foreign_key_inheritance(self):
+        class Base(TestModel):
+            class Meta:
+                database = self.database
+        class WithTimestamp(Base):
+            timestamp = TimestampField()
+        class Tweet(Base):
+            user = DeferredForeignKey('DUser')
+            content = TextField()
+        class TimestampTweet(Tweet, WithTimestamp): pass
+        class DUser(Base):
+            username = TextField()
+
+        sql, params = Tweet._schema._create_table(safe=False).query()
+        self.assertEqual(sql, (
+            'CREATE TABLE "tweet" ('
+            '"id" INTEGER NOT NULL PRIMARY KEY, '
+            '"content" TEXT NOT NULL, '
+            '"user_id" INTEGER NOT NULL)'))
+
+        sql, params = TimestampTweet._schema._create_table(safe=False).query()
+        self.assertEqual(sql, (
+            'CREATE TABLE "timestamp_tweet" ('
+            '"id" INTEGER NOT NULL PRIMARY KEY, '
+            '"timestamp" INTEGER NOT NULL, '
+            '"content" TEXT NOT NULL, '
+            '"user_id" INTEGER NOT NULL)'))
 
     def test_identity_field(self):
         class PG10Identity(TestModel):

@@ -564,22 +564,18 @@ Sqlcipher backend
 
 * Although this extention's code is short, it has not been properly
   peer-reviewed yet and may have introduced vulnerabilities.
-* The code contains minimum values for `passphrase` length and
-  `kdf_iter`, as well as a default value for the later.
-  **Do not** regard these numbers as advice. Consult the docs at
-  http://sqlcipher.net/sqlcipher-api/ and security experts.
 
 Also note that this code relies on pysqlcipher_ and sqlcipher_, and
 the code there might have vulnerabilities as well, but since these
 are widely used crypto modules, we can expect "short zero days" there.
 
-..  _pysqlcipher: https://pypi.python.org/pypi/pysqlcipher
+..  _pysqlcipher: https://pypi.python.org/pypi/pysqlcipher3
 ..  _sqlcipher: http://sqlcipher.net
 
 sqlcipher_ext API notes
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-.. py:class:: SqlCipherDatabase(database, passphrase, kdf_iter=64000, **kwargs)
+.. py:class:: SqlCipherDatabase(database, passphrase, **kwargs)
 
     Subclass of :py:class:`SqliteDatabase` that stores the database
     encrypted. Instead of the standard ``sqlite3`` backend, it uses pysqlcipher_:
@@ -589,15 +585,15 @@ sqlcipher_ext API notes
 
     :param database: Path to encrypted database filename to open [or create].
     :param passphrase: Database encryption passphrase: should be at least 8 character
-        long (or an error is raised), but it is *strongly advised* to enforce better
-        `passphrase strength`_ criteria in your implementation.
-    :param kdf_iter: [Optional] number of PBKDF2_ iterations.
+        long, but it is *strongly advised* to enforce better `passphrase strength`_
+        criteria in your implementation.
 
     * If the ``database`` file doesn't exist, it will be *created* with
-      encryption by a key derived from ``passhprase`` with ``kdf_iter``
-      PBKDF2_ iterations.
-    * When trying to open an existing database, ``passhprase`` and ``kdf_iter``
-      should be *identical* to the ones used when it was created.
+      encryption by a key derived from ``passhprase``.
+    * When trying to open an existing database, ``passhprase`` should be
+      identical to the ones used when it was created. If the passphrase is
+      incorrect, an error will be raised when first attempting to access the
+      database.
 
     .. py:method:: rekey(passphrase)
 
@@ -605,29 +601,30 @@ sqlcipher_ext API notes
 
         Change the passphrase for database.
 
-.. _PBKDF2: https://en.wikipedia.org/wiki/PBKDF2
 .. _passphrase strength: https://en.wikipedia.org/wiki/Password_strength
 
-Notes:
+.. note::
+    SQLCipher can be configured using a number of extension PRAGMAs. The list
+    of PRAGMAs and their descriptions can be found in the `SQLCipher documentation <https://www.zetetic.net/sqlcipher/sqlcipher-api/>`_.
 
-    * [Hopefully] there's no way to tell whether the passphrase is wrong
-      or the file is corrupt.
-      In both cases -- *the first time we try to access the database* -- a
-      :py:class:`DatabaseError` error is raised,
-      with the *exact* message: ``"file is encrypted or is not a database"``.
+    For example to specify the number of PBKDF2 iterations for the key
+    derivation (64K in SQLCipher 3.x, 256K in SQLCipher 4.x by default):
 
-      As mentioned above, this only happens when you *access* the database,
-      so if you need to know *right away* whether the passphrase was correct,
-      you can trigger this check by calling [e.g.]
-      :py:meth:`~Database.get_tables()` (see example below).
+    .. code-block:: python
 
-    * Most applications can expect failed attempts to open the database
-      (common case: prompting the user for ``passphrase``), so
-      the database can't be hardwired into the :py:class:`Meta` of
-      model classes. To defer initialization, pass `None` in to the
-      database.
+        # Use 1,000,000 iterations.
+        db = SqlCipherDatabase('my_app.db', pragmas={'kdf_iter': 1000000})
 
-Example:
+    To use a cipher page-size of 16KB and a cache-size of 10,000 pages:
+
+    .. code-block:: python
+
+        db = SqlCipherDatabase('my_app.db', passphrase='secret!!!', pragmas={
+            'cipher_page_size': 1024 * 16,
+            'cache_size': 10000})  # 10,000 16KB pages, or 160MB.
+
+
+Example of prompting the user for a passphrase:
 
 .. code-block:: python
 
@@ -1502,6 +1499,19 @@ postgres_ext API notes
             }
             APIResponse.select().where(
                 APIResponse.data.contained_by(big_doc))
+
+    .. py:method:: concat(data)
+
+        Concatentate two field data and the provided data. Note that this
+        operation does not merge or do a "deep concat".
+
+    .. py:method:: has_key(key)
+
+        Test whether the key exists at the top-level of the JSON object.
+
+    .. py:method:: remove(*keys)
+
+        Remove one or more keys from the top-level of the JSON object.
 
 
 .. py:function:: Match(field, query)
@@ -2409,6 +2419,12 @@ helpers for serializing models to dictionaries and vice-versa.
 
         >>> model_to_dict(t2, recurse=False)
         {'id': 1, 'message': 'tweet-2', 'user': 1}
+
+    The implementation of ``model_to_dict`` is fairly complex, owing to the
+    various usages it attempts to support. If you have a special usage, I
+    strongly advise that you do **not** attempt to shoe-horn some crazy
+    combination of parameters into this function. Just write a simple function
+    that accomplishes exactly what you're attempting to do.
 
 .. py:function:: dict_to_model(model_class, data[, ignore_unknown=False])
 

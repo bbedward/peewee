@@ -1653,16 +1653,18 @@ Query-builder
 
 .. py:class:: Tuple(*args)
 
-    Represent a SQL row tuple.
+    Represent a SQL `row value <https://www.sqlite.org/rowvalue.html>`_.
+    Row-values are supported by most databases.
 
 
-.. py:class:: OnConflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None[, conflict_constraint=None]]]]]])
+.. py:class:: OnConflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None[, conflict_where=None[, conflict_constraint=None]]]]]]])
 
     :param str action: Action to take when resolving conflict.
     :param update: A dictionary mapping column to new value.
     :param preserve: A list of columns whose values should be preserved from the original INSERT.
     :param where: Expression to restrict the conflict resolution.
-    :param conflict_target: Column(s) to check.
+    :param conflict_target: Column(s) that comprise the constraint.
+    :param conflict_where: Expressions needed to match the constraint target if it is a partial index (index with a WHERE clause).
     :param str conflict_constraint: Name of constraint to use for conflict
         resolution. Currently only supported by Postgres.
 
@@ -1691,6 +1693,11 @@ Query-builder
     .. py:method:: conflict_target(*constraints)
 
         :param constraints: Column(s) to use as target for conflict resolution.
+
+    .. py:method:: conflict_where(*expressions)
+
+        :param expressions: Expressions that match the conflict target index,
+            in the case the conflict target is a partial index.
 
     .. py:method:: conflict_constraint(constraint)
 
@@ -1860,6 +1867,16 @@ Query-builder
             :py:meth:`~Query.where` calls are chainable.  Multiple calls will
             be "AND"-ed together.
 
+    .. py:method:: orwhere(*expressions)
+
+        :param expressions: zero or more expressions to include in the WHERE
+            clause.
+
+        Include the given expressions in the WHERE clause of the query. This
+        method is the same as the :py:meth:`Query.where` method, except that
+        the expressions will be OR-ed together with any previously-specified
+        WHERE expressions.
+
     .. py:method:: order_by(*values)
 
         :param values: zero or more Column-like objects to order by.
@@ -1942,6 +1959,56 @@ Query-builder
                 print(category.name, category.level)
 
         For more examples of CTEs, see :ref:`cte`.
+
+    .. py:method:: select_from(*columns)
+
+        :param columns: one or more columns to select from the inner query.
+        :return: a new query that wraps the calling query.
+
+        Create a new query that wraps the current (calling) query. For example,
+        suppose you have a simple ``UNION`` query, and need to apply an
+        aggregation on the union result-set. To do this, you need to write
+        something like:
+
+        .. code-block:: sql
+
+            SELECT "u"."owner", COUNT("u"."id") AS "ct"
+            FROM (
+                SELECT "id", "owner", ... FROM "cars"
+                UNION
+                SELECT "id", "owner", ... FROM "motorcycles"
+                UNION
+                SELECT "id", "owner", ... FROM "boats") AS "u"
+            GROUP BY "u"."owner"
+
+        The :py:meth:`~SelectQuery.select_from` method is designed to simplify
+        constructing this type of query.
+
+        Example peewee code:
+
+        .. code-block:: python
+
+              class Car(Model):
+                  owner = ForeignKeyField(Owner, backref='cars')
+                  # ... car-specific fields, etc ...
+
+              class Motorcycle(Model):
+                  owner = ForeignKeyField(Owner, backref='motorcycles')
+                  # ... motorcycle-specific fields, etc ...
+
+              class Boat(Model):
+                  owner = ForeignKeyField(Owner, backref='boats')
+                  # ... boat-specific fields, etc ...
+
+              cars = Car.select(Car.owner)
+              motorcycles = Motorcycle.select(Motorcycle.owner)
+              boats = Boat.select(Boat.owner)
+
+              union = cars | motorcycles | boats
+
+              query = (union
+                       .select_from(union.c.owner, fn.COUNT(union.c.id))
+                       .group_by(union.c.owner))
 
     .. py:method:: union_all(dest)
 
@@ -2349,14 +2416,15 @@ Query-builder
 
         Specify REPLACE conflict resolution strategy.
 
-    .. py:method:: on_conflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None[, conflict_constraint=None]]]]]])
+    .. py:method:: on_conflict([action=None[, update=None[, preserve=None[, where=None[, conflict_target=None[, conflict_where=None[, conflict_constraint=None]]]]]]])
 
         :param str action: Action to take when resolving conflict. If blank,
             action is assumed to be "update".
         :param update: A dictionary mapping column to new value.
         :param preserve: A list of columns whose values should be preserved from the original INSERT.
         :param where: Expression to restrict the conflict resolution.
-        :param conflict_target: Column(s) to check.
+        :param conflict_target: Column(s) that comprise the constraint.
+        :param conflict_where: Expressions needed to match the constraint target if it is a partial index (index with a WHERE clause).
         :param str conflict_constraint: Name of constraint to use for conflict
             resolution. Currently only supported by Postgres.
 
@@ -2429,7 +2497,7 @@ Query-builder
     :param bool unique: Whether index is UNIQUE.
     :param bool safe: Whether to add IF NOT EXISTS clause.
     :param Expression where: Optional WHERE clause for index.
-    :param str using: Index algorithm.
+    :param str using: Index algorithm or type, e.g. 'BRIN', 'GiST' or 'GIN'.
     :param str name: Optional index name.
 
     Expressive method for declaring an index on a model.
@@ -2481,7 +2549,7 @@ Query-builder
 Fields
 ------
 
-.. py:class:: Field([null=False[, index=False[, unique=False[, column_name=None[, default=None[, primary_key=False[, constraints=None[, sequence=None[, collation=None[, unindexed=False[, choices=None[, help_text=None[, verbose_name=None]]]]]]]]]]]]])
+.. py:class:: Field([null=False[, index=False[, unique=False[, column_name=None[, default=None[, primary_key=False[, constraints=None[, sequence=None[, collation=None[, unindexed=False[, choices=None[, help_text=None[, verbose_name=None[, index_type=None]]]]]]]]]]]]]])
 
     :param bool null: Field allows NULLs.
     :param bool index: Create an index on field.
@@ -2499,6 +2567,7 @@ Fields
         displaying a dropdown of choices for field values, for example.
     :param str help_text: Help-text for field, metadata purposes only.
     :param str verbose_name: Verbose name for field, metadata purposes only.
+    :param str index_type: Specify index type (postgres only), e.g. 'BRIN'.
 
     Fields on a :py:class:`Model` are analogous to columns on a table.
 
@@ -2927,7 +2996,8 @@ Fields
         self-referential foreign key.
     :param Field field: Field to reference on ``model`` (default is primary
         key).
-    :param str backref: Accessor name for back-reference.
+    :param str backref: Accessor name for back-reference, or "+" to disable
+        the back-reference accessor.
     :param str on_delete: ON DELETE action, e.g. ``'CASCADE'``..
     :param str on_update: ON UPDATE action.
     :param str deferrable: Control when constraint is enforced, e.g. ``'INITIALLY DEFERRED'``.
@@ -3393,7 +3463,7 @@ Schema Manager
 Model
 -----
 
-.. py:class:: Metadata(model[, database=None[, table_name=None[, indexes=None[, primary_key=None[, constraints=None[, schema=None[, only_save_dirty=False[, table_alias=None[, depends_on=None[, options=None[, without_rowid=False[, **kwargs]]]]]]]]]]]])
+.. py:class:: Metadata(model[, database=None[, table_name=None[, indexes=None[, primary_key=None[, constraints=None[, schema=None[, only_save_dirty=False[, depends_on=None[, options=None[, without_rowid=False[, **kwargs]]]]]]]]]]]])
 
     :param Model model: Model class.
     :param Database database: database model is bound to.
@@ -3405,7 +3475,6 @@ Model
     :param str schema: Schema table exists in.
     :param bool only_save_dirty: When :py:meth:`~Model.save` is called, only
         save the fields which have been modified.
-    :param str table_alias: Specify preferred alias for table in queries.
     :param dict options: Arbitrary options for the model.
     :param bool without_rowid: Specify WITHOUT ROWID (sqlite only).
     :param kwargs: Arbitrary setting attributes and values.
